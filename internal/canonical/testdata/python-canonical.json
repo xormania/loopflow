@@ -1,0 +1,151 @@
+{
+  "cases": [
+    {
+      "canonical": "{}",
+      "input": {},
+      "name": "empty-object",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "canonical": "[]",
+      "input": [],
+      "name": "empty-array",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "canonical": "{\"f\":false,\"n\":null,\"t\":true}",
+      "input": {
+        "f": false,
+        "n": null,
+        "t": true
+      },
+      "name": "scalars",
+      "sha256": "22e00dc2f7b01420f940fbdbfbdf34fa0667cc6500186495023ba37722cbd05e"
+    },
+    {
+      "canonical": "{\"-\":8,\"0\":6,\"A\":2,\"B\":4,\"_\":5,\"a\":3,\"b\":1,\"~\":7}",
+      "input": {
+        "-": 8,
+        "0": 6,
+        "A": 2,
+        "B": 4,
+        "_": 5,
+        "a": 3,
+        "b": 1,
+        "~": 7
+      },
+      "name": "key-order-ascii",
+      "sha256": "d4e31e68f686dd6bb2ed109052128092a1efb5ba018b263f3d4a1c5b55e90dea"
+    },
+    {
+      "canonical": "{\"a\":4,\"z\":1,\"\\u00e9\":2,\"\\u4e2d\\u6587\":3,\"\\ud83d\\ude00\":5}",
+      "input": {
+        "a": 4,
+        "z": 1,
+        "\u00e9": 2,
+        "\u4e2d\u6587": 3,
+        "\ud83d\ude00": 5
+      },
+      "name": "key-order-non-ascii",
+      "sha256": "e24c2880bf953a4b57473889d1d1f88cfe699b8ce2df95c33a5db8c4c171c9a7"
+    },
+    {
+      "canonical": "{\"\":4,\"a\":2,\"ab\":1,\"abc\":3}",
+      "input": {
+        "": 4,
+        "a": 2,
+        "ab": 1,
+        "abc": 3
+      },
+      "name": "key-order-prefix",
+      "sha256": "c0e051538c71da584d1a20143689ac8785b26c3bd150e8b5c1844f631e2683a4"
+    },
+    {
+      "canonical": "{\"beyond_float64\":9007199254740993,\"bignum\":123456789012345678901234567890,\"max_i64\":9223372036854775807,\"min_i64\":-9223372036854775808,\"neg\":-1,\"neg_bignum\":-123456789012345678901234567890,\"small\":42,\"zero\":0}",
+      "input": {
+        "beyond_float64": 9007199254740993,
+        "bignum": 123456789012345678901234567890,
+        "max_i64": 9223372036854775807,
+        "min_i64": -9223372036854775808,
+        "neg": -1,
+        "neg_bignum": -123456789012345678901234567890,
+        "small": 42,
+        "zero": 0
+      },
+      "name": "integers",
+      "sha256": "b88cb28898bb1d7bc1f1291224f2327c516bbfb653a201a8f23bbf8efc491822"
+    },
+    {
+      "canonical": "{\"amp\":\"&\",\"s\":\"<script>&amp;</script>\",\"slash\":\"a/b\"}",
+      "input": {
+        "amp": "&",
+        "s": "<script>&amp;</script>",
+        "slash": "a/b"
+      },
+      "name": "html-chars",
+      "sha256": "77418eea1aeee475be7475e7dbd5a2be7b783dcdf25fc2af318a0f282c84f203"
+    },
+    {
+      "canonical": "{\"accented\":\"caf\\u00e9\",\"astral-pair\":\"\\ud834\\udd1e\",\"backslash\":\"\\\\\",\"backspace\":\"\\b\",\"cjk\":\"\\u4e2d\\u6587\",\"cr\":\"\\r\",\"del\":\"\\u007f\",\"emoji\":\"\\ud83d\\ude00\",\"formfeed\":\"\\f\",\"mixed\":\"a\\u0000b\\u007fc\\ud83d\\ude00\",\"nbsp\":\"\\u00a0\",\"newline\":\"\\n\",\"nul\":\"\\u0000\",\"quote\":\"\\\"\",\"tab\":\"\\t\",\"unit-sep\":\"\\u001f\"}",
+      "input": {
+        "accented": "caf\u00e9",
+        "astral-pair": "\ud834\udd1e",
+        "backslash": "\\",
+        "backspace": "\b",
+        "cjk": "\u4e2d\u6587",
+        "cr": "\r",
+        "del": "\u007f",
+        "emoji": "\ud83d\ude00",
+        "formfeed": "\f",
+        "mixed": "a\u0000b\u007fc\ud83d\ude00",
+        "nbsp": "\u00a0",
+        "newline": "\n",
+        "nul": "\u0000",
+        "quote": "\"",
+        "tab": "\t",
+        "unit-sep": "\u001f"
+      },
+      "name": "escapes",
+      "sha256": "07ccc005114ba86cf5cd6ce20ae86d307757f3197e485d46a71a85ad85317182"
+    },
+    {
+      "canonical": "{\"a\":{\"k\":\"v\"},\"b\":[1,{\"x\":[3,[],{}],\"y\":2},null]}",
+      "input": {
+        "a": {
+          "k": "v"
+        },
+        "b": [
+          1,
+          {
+            "x": [
+              3,
+              [],
+              {}
+            ],
+            "y": 2
+          },
+          null
+        ]
+      },
+      "name": "nested",
+      "sha256": "5d8ad6d8bd2dc1409c24b71d892174fb8daa0b29eb9709c1b3cc97a15feddd86"
+    },
+    {
+      "canonical": "{\"issue_key\":\"initialized\",\"outcome\":\"passed\",\"phase\":\"init\",\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":1,\"state_sha256\":\"0e251dcac955cf58eede51cfd535ea5419c31dc811f5b93b1d24f6588d63886e\",\"time\":\"2026-08-05T20:32:30.615324Z\"}",
+      "input": {
+        "issue_key": "initialized",
+        "outcome": "passed",
+        "phase": "init",
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "seq": 1,
+        "state_sha256": "0e251dcac955cf58eede51cfd535ea5419c31dc811f5b93b1d24f6588d63886e",
+        "time": "2026-08-05T20:32:30.615324Z"
+      },
+      "name": "golden-vector-event-without-hash",
+      "sha256": "8d828243335339b5dbd0ba4c5929ca61251c38d688379a108c7e283b922087ae"
+    }
+  ],
+  "form": "json.dumps(obj, sort_keys=True, separators=(\",\", \":\"))",
+  "generator": "internal/canonical/testdata/gen_python_fixture.py",
+  "python": "3.12.3"
+}
