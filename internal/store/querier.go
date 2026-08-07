@@ -24,8 +24,13 @@ type Querier interface {
 	// Content is immutable and named by its digest, so a repeated put of
 	// identical bytes is a no-op rather than a conflict.
 	InsertArtifact(ctx context.Context, arg InsertArtifactParams) error
+	// Append-only. There is deliberately no update or delete here: an attempt is a
+	// fact about a moment, and a later attempt is a new row.
+	InsertAttempt(ctx context.Context, arg InsertAttemptParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
+	ListAllAttempts(ctx context.Context) ([]Attempt, error)
 	ListArtifacts(ctx context.Context) ([]Artifact, error)
+	ListAttempts(ctx context.Context, packetID string) ([]Attempt, error)
 	ListClaims(ctx context.Context) ([]Claim, error)
 	ListEvents(ctx context.Context, packetID string) ([]Event, error)
 	ListPackets(ctx context.Context) ([]Packet, error)

@@ -12,6 +12,32 @@ type Artifact struct {
 	CreatedAt string
 }
 
+type Attempt struct {
+	AttemptID      string
+	PacketID       string
+	Transition     string
+	Argv           string
+	AttemptedAt    string
+	DurationMs     int64
+	ExitCode       int64
+	Marker         string
+	Reason         string
+	RecordKind     string
+	Exhaustiveness string
+	EventAppended  int64
+	EventsBefore   int64
+	EventsAfter    int64
+	HeadBefore     string
+	HeadAfter      string
+	StageBefore    string
+	StageAfter     string
+	StdoutTail     string
+	StderrTail     string
+	StdoutSha256   string
+	StderrSha256   string
+	ToolSha256     string
+}
+
 type Claim struct {
 	PacketID   string
 	Owner      string

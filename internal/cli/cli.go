@@ -8,6 +8,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,11 +16,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/xormania/wfc/internal/artifacts"
+	"github.com/xormania/wfc/internal/attempts"
 	"github.com/xormania/wfc/internal/canonical"
 	"github.com/xormania/wfc/internal/claims"
 	"github.com/xormania/wfc/internal/events"
@@ -84,6 +87,16 @@ Commands:
         different live session already holds it — that is the guard against
         launching a second worker for work already in flight. Re-recording
         the same session id is the heartbeat.
+
+  run <packet-dir> -- <command…>
+        Run a Flow command and record the attempt: argv, exit, marker,
+        output, and the packet's event count, head, and stage before and
+        after. Output and exit code pass straight through, so this can sit
+        in front of an existing invocation unchanged. A refusal leaves no
+        trace in the packet, so this is the only place it survives.
+
+  attempts <packet-dir>
+        The failures a packet already records, and the refusals seen since.
 
   sessions [<packet>] [-all]
         Which sessions are running, stale, or terminal, and the id to resume.
@@ -162,6 +175,8 @@ func init() {
 		"get":      cmdGet,
 		"check":    cmdCheck,
 		"claim":    cmdClaim,
+		"run":      cmdRun,
+		"attempts": cmdAttempts,
 		"session":  cmdSession,
 		"sessions": cmdSessions,
 		"release":  cmdRelease,
@@ -181,6 +196,7 @@ type env struct {
 	art      *artifacts.Store
 	claims   *claims.Store
 	sessions *sessions.Store
+	attempts *attempts.Store
 }
 
 // flags returns a FlagSet that also accepts the global flags, so that both
@@ -240,6 +256,7 @@ func (e *env) open(ctx context.Context) error {
 	e.art = art
 	e.claims = claims.New(db)
 	e.sessions = sessions.New(db)
+	e.attempts = attempts.New(db)
 	return nil
 }
 
@@ -1039,4 +1056,279 @@ func describeSession(s sessions.Session) string {
 		out += "  " + s.Reason
 	}
 	return out
+}
+
+// ------------------------------------------------------------------- run ----
+
+// cmdRun executes a Flow command against a packet and records the attempt.
+//
+// It is deliberately transparent: output is passed through as it is captured
+// and the child's exit code becomes wfc's, so `wfc run <dir> --` can be put in
+// front of an existing invocation without changing what that invocation does.
+//
+// One process owns both the execution and the capture. A coordinator that ran
+// the command and then called wfc separately would lose the diagnostic in
+// exactly the case it is most wanted — a crash or a context loss between the
+// two.
+func cmdRun(ctx context.Context, e *env, args []string) int {
+	sep := -1
+	for i, a := range args {
+		if a == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 {
+		return e.usage(errors.New("run needs -- before the command, e.g. wfc run <packet-dir> -- python3 …"))
+	}
+	own, command := args[:sep], args[sep+1:]
+	if len(command) == 0 {
+		return e.usage(errors.New("run needs a command after --"))
+	}
+
+	fs := e.flags("run")
+	pos, err := parseArgs(fs, own)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("run takes exactly one packet directory"))
+	}
+	dir := pos[0]
+
+	before, err := readBindings(dir)
+	if err != nil {
+		return e.fail(err)
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdout = io.MultiWriter(e.out, &stdout)
+	cmd.Stderr = io.MultiWriter(e.errOut, &stderr)
+	cmd.Stdin = nil
+
+	started := time.Now()
+	runErr := cmd.Run()
+	elapsed := time.Since(started)
+
+	exitCode := 0
+	var exitErr *exec.ExitError
+	switch {
+	case runErr == nil:
+	case errors.As(runErr, &exitErr):
+		exitCode = exitErr.ExitCode()
+	default:
+		return e.fail(fmt.Errorf("run %s: %w", command[0], runErr))
+	}
+
+	// Read the packet again even when the command failed: whether it moved is
+	// what separates a refusal from an accepted failure.
+	after, err := readBindings(dir)
+	if err != nil {
+		after = before
+	}
+
+	attempt, err := e.attempts.Record(ctx, attempts.Outcome{
+		Argv:       command,
+		ExitCode:   exitCode,
+		Stdout:     stdout.Bytes(),
+		Stderr:     stderr.Bytes(),
+		DurationMS: elapsed.Milliseconds(),
+		ToolSHA256: hashToolInArgv(command),
+		Before:     before,
+		After:      after,
+	})
+	if err != nil {
+		fmt.Fprintf(e.errOut, "wfc: recording the attempt failed: %v\n", err)
+		return exitCode
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.errOut, map[string]any{"ok": true, "attempt": attempt})
+	} else {
+		fmt.Fprintf(e.errOut, "wfc: recorded %s %s (%s)\n", attempt.ID, attempt.Kind, attempt.Transition)
+	}
+	return exitCode
+}
+
+// --------------------------------------------------------------- attempts ---
+
+func cmdAttempts(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("attempts")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("attempts takes exactly one packet directory"))
+	}
+	dir := pos[0]
+
+	current, err := readBindings(dir)
+	if err != nil {
+		return e.fail(err)
+	}
+	failed, chainErr := readFailedEvents(dir)
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	list, err := e.attempts.List(ctx, current.Packet, current)
+	if err != nil {
+		return e.fail(err)
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{
+			"ok":                        true,
+			"packet":                    current.Packet,
+			"bindings":                  current,
+			"last_observed_refusals":    list,
+			"recorded_failed_events":    failed,
+			"exhaustiveness_disclaimer": exhaustivenessNote,
+		})
+		return ExitOK
+	}
+
+	fmt.Fprintf(e.out, "packet   %s\n", current.Packet)
+	fmt.Fprintf(e.out, "stage    %s  (%d events, head %s)\n",
+		current.Stage, current.Events, short(current.Head))
+
+	fmt.Fprintf(e.out, "\nrecorded failed events — the durable ones, already in the chain\n")
+	if chainErr != nil {
+		fmt.Fprintf(e.out, "  (chain unreadable: %v)\n", chainErr)
+	} else if len(failed) == 0 {
+		fmt.Fprintf(e.out, "  none\n")
+	}
+	for _, f := range failed {
+		fmt.Fprintf(e.out, "  seq %-3d %-18s %-32s %s\n", f.Seq, f.Phase, f.IssueKey, f.Report)
+	}
+
+	fmt.Fprintf(e.out, "\nobserved refusals — first failed precondition only, never the full set\n")
+	if len(list) == 0 {
+		fmt.Fprintf(e.out, "  none recorded; run Flow through `wfc run` to capture them\n")
+		return ExitOK
+	}
+	for _, a := range list {
+		state := "superseded"
+		if a.Current {
+			state = "current"
+		}
+		fmt.Fprintf(e.out, "  %s %-10s %-24s %s\n", a.At, state, a.Kind, a.Transition)
+		if a.Reason != "" {
+			fmt.Fprintf(e.out, "      %s %s\n", a.Marker, a.Reason)
+		}
+	}
+	fmt.Fprintf(e.out, "\n%s\n", exhaustivenessNote)
+	return ExitOK
+}
+
+const exhaustivenessNote = "Flow validates fail-fast: a refusal names the first unmet " +
+	"precondition, not every one. This is not a complete account of what blocks the packet."
+
+// failedEvent is a durable failure already recorded in the packet's chain.
+type failedEvent struct {
+	Seq      int64  `json:"seq"`
+	Phase    string `json:"phase"`
+	IssueKey string `json:"issue_key,omitempty"`
+	Report   string `json:"report,omitempty"`
+	Cycle    int64  `json:"cycle,omitempty"`
+}
+
+// readFailedEvents indexes the failures the packet already records. These are
+// the expensive blockers — an accepted transition that recorded a failed review
+// is durable evidence, unlike a refusal, which leaves no trace at all.
+func readFailedEvents(dir string) ([]failedEvent, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "workflow-events.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	var out []failedEvent
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		obj, err := canonical.DecodeObject([]byte(line))
+		if err != nil {
+			return out, err
+		}
+		ev := events.Event(obj)
+		if outcome, _ := ev.Str(events.FieldOutcome); outcome != "failed" {
+			continue
+		}
+		seq, _ := ev.Seq()
+		phase, _ := ev.Str(events.FieldPhase)
+		issue, _ := ev.Str(events.FieldIssueKey)
+		report, _ := ev.Str("report")
+		f := failedEvent{Seq: seq, Phase: phase, IssueKey: issue, Report: report}
+		if n, ok := ev["cycle"]; ok {
+			if c, ok := jsonInt(n); ok {
+				f.Cycle = c
+			}
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// readBindings reads the packet facts an attempt is measured against.
+func readBindings(dir string) (attempts.Bindings, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "workflow-state.json"))
+	if err != nil {
+		return attempts.Bindings{}, fmt.Errorf("read packet state: %w", err)
+	}
+	obj, err := canonical.DecodeObject(raw)
+	if err != nil {
+		return attempts.Bindings{}, fmt.Errorf("parse packet state: %w", err)
+	}
+	b := attempts.Bindings{}
+	b.Packet, _ = obj["change_id"].(string)
+	b.Stage, _ = obj["stage"].(string)
+	b.Head, _ = obj["last_event_hash"].(string)
+	if n, ok := jsonInt(obj["event_count"]); ok {
+		b.Events = n
+	}
+	if b.Packet == "" {
+		b.Packet = filepath.Base(filepath.Clean(dir))
+	}
+	return b, nil
+}
+
+func jsonInt(v any) (int64, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	i, err := n.Int64()
+	return i, err == nil
+}
+
+// hashToolInArgv digests the script being invoked, so an attempt records which
+// version of Flow judged it.
+func hashToolInArgv(argv []string) string {
+	for _, arg := range argv {
+		if !strings.HasSuffix(arg, ".py") {
+			continue
+		}
+		raw, err := os.ReadFile(arg)
+		if err != nil {
+			return ""
+		}
+		return canonical.SHA256Bytes(raw)
+	}
+	return ""
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12] + "…"
+	}
+	return h
 }

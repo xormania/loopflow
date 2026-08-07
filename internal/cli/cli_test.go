@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -397,5 +398,119 @@ func TestSessionTakeover(t *testing.T) {
 
 	if got := r.mustRun("sessions", "p1").stdout; !strings.Contains(got, "new") {
 		t.Errorf("sessions = %q", got)
+	}
+}
+
+// writePacket makes a minimal native packet directory.
+func writePacket(t *testing.T, stage string, events int64, head string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "packet")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	state := fmt.Sprintf(
+		`{"change_id":"pkt-1","stage":%q,"event_count":%d,"last_event_hash":%q}`,
+		stage, events, head)
+	if err := os.WriteFile(filepath.Join(dir, "workflow-state.json"), []byte(state), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"), nil, 0o600); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+	return dir
+}
+
+// A refused transition leaves no trace in the packet, so the wrapper is the
+// only place its reason survives. It must also stay transparent.
+func TestRunRecordsARefusalAndPassesTheExitThrough(t *testing.T) {
+	r := newRunner(t)
+	dir := writePacket(t, "tests-frozen", 10, "abc123")
+
+	got := r.run("run", dir, "--", "sh", "-c",
+		`echo "WORKFLOW-ERROR stage tests-frozen does not permit this transition" >&2; exit 2`)
+	if got.code != 2 {
+		t.Errorf("exit = %d, want the child's 2", got.code)
+	}
+	if !strings.Contains(got.stderr, "does not permit this transition") {
+		t.Errorf("the child's output did not pass through: %q", got.stderr)
+	}
+
+	out := r.mustRun("attempts", dir).stdout
+	if !strings.Contains(out, "attempt-refusal") {
+		t.Errorf("attempts = %q, want an attempt-refusal", out)
+	}
+	if !strings.Contains(out, "does not permit this transition") {
+		t.Errorf("the reason was not recorded: %q", out)
+	}
+	// It must never read as a complete account of what blocks the packet.
+	if !strings.Contains(out, "fail-fast") {
+		t.Error("no fail-fast disclaimer")
+	}
+}
+
+// A refusal changed nothing; an accepted failed review advanced the packet and
+// is durable in its chain. Conflating them makes the record worse than nothing.
+func TestRunSeparatesRefusalFromAcceptedFailure(t *testing.T) {
+	r := newRunner(t)
+	dir := writePacket(t, "red-recorded", 3, "head-3")
+
+	// A command that appends an event and exits 0: accepted, and it recorded
+	// a failure.
+	advance := fmt.Sprintf(
+		`printf '%%s' '{"change_id":"pkt-1","stage":"gap-repair-required","event_count":4,"last_event_hash":"head-4"}' > %s;`+
+			`echo WORKFLOW-BLOCKED gap review failed`,
+		filepath.Join(dir, "workflow-state.json"))
+
+	got := r.run("run", dir, "--", "sh", "-c", advance)
+	if got.code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stderr, "accepted-failed-review") {
+		t.Errorf("classified as %q, want accepted-failed-review", got.stderr)
+	}
+}
+
+// A stored reason explains the packet only while the packet still has the
+// bindings it had when the reason was produced.
+func TestAttemptsGoStaleWhenThePacketMoves(t *testing.T) {
+	r := newRunner(t)
+	dir := writePacket(t, "tests-frozen", 10, "head-10")
+
+	r.run("run", dir, "--", "sh", "-c", `echo "WORKFLOW-ERROR nope" >&2; exit 2`)
+	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "current") {
+		t.Errorf("attempt not current straight after recording: %q", out)
+	}
+
+	// The packet advances; the recorded reason is still true about its moment
+	// but no longer describes now.
+	moved := `{"change_id":"pkt-1","stage":"green-recorded","event_count":11,"last_event_hash":"head-11"}`
+	if err := os.WriteFile(filepath.Join(dir, "workflow-state.json"), []byte(moved), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "superseded") {
+		t.Errorf("attempt still current after the packet moved: %q", out)
+	}
+}
+
+// The durable failures — the expensive category — are indexed from the chain
+// the packet already keeps.
+func TestAttemptsIndexesRecordedFailedEvents(t *testing.T) {
+	r := newRunner(t)
+	dir := writePacket(t, "tests-frozen", 2, "head-2")
+
+	chain := `{"issue_key":"product-negative-seam-parity","outcome":"failed","phase":"test-gap-review",` +
+		`"report":"results/grok/gap-cycle-0.md","seq":1}` + "\n" +
+		`{"issue_key":"none","outcome":"passed","phase":"test-freeze","seq":2}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"), []byte(chain), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	out := r.mustRun("attempts", dir).stdout
+	if !strings.Contains(out, "product-negative-seam-parity") ||
+		!strings.Contains(out, "results/grok/gap-cycle-0.md") {
+		t.Errorf("failed event not indexed: %q", out)
+	}
+	if strings.Contains(out, "test-freeze") {
+		t.Errorf("a passed event was listed as a failure: %q", out)
 	}
 }
