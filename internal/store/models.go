@@ -70,9 +70,10 @@ type PacketState struct {
 	LastHash    string
 }
 
-type Session struct {
+type WorkerSession struct {
 	PacketID   string
 	Role       string
+	Task       string
 	Cycle      int64
 	Client     string
 	SessionID  string
@@ -85,4 +86,22 @@ type Session struct {
 	StartedAt  string
 	LastSeen   string
 	TtlSeconds int64
+}
+
+type WorkerSessionHistory struct {
+	HistoryID   int64
+	PacketID    string
+	Role        string
+	Task        string
+	Cycle       int64
+	Client      string
+	SessionID   string
+	AgentPath   string
+	Status      string
+	Liveness    string
+	StartedAt   string
+	LastSeen    string
+	ReplacedAt  string
+	ReplacedBy  string
+	ReplaceNote string
 }

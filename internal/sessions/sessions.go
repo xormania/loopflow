@@ -44,8 +44,10 @@ const (
 	LiveTerminal = "terminal"
 )
 
-// ErrLive reports that a different session is already live for a role-task.
-var ErrLive = errors.New("a live session already holds this role-task")
+// ErrLive reports that a different session is already registered for a
+// role-task, live or stale. Both refuse; the difference is what the caller
+// should do about it.
+var ErrLive = errors.New("a session is already registered for this role-task")
 
 // LiveError carries the session that is in the way, so the caller can resume it
 // instead of launching a second one.
@@ -59,9 +61,47 @@ func (e *LiveError) Error() string {
 	if id == "" {
 		id = "(no session id recorded)"
 	}
-	return fmt.Sprintf("%s/%s cycle %d is already held by a live %s session %s, last seen %s",
-		e.Existing.Packet, e.Existing.Role, e.Existing.Cycle,
-		e.Existing.Client, id, e.Existing.LastSeen.Format(timeFormat))
+	advice := "resume it rather than launching another"
+	if e.Existing.Liveness == LiveStale {
+		// Stale means wfc has not heard from it, not that it stopped. wfc never
+		// watches a worker exit, so it cannot license a replacement; only the
+		// caller can, having checked.
+		advice = "it has gone quiet, which is not the same as having stopped — " +
+			"verify the process, then re-run with -takeover if it is really gone"
+	}
+	return fmt.Sprintf("%s %s cycle %d is held by a %s %s session %s, last seen %s; %s",
+		e.Existing.Packet, e.Existing.RoleTask(), e.Existing.Cycle,
+		e.Existing.Liveness, e.Existing.Client, id,
+		e.Existing.LastSeen.Format(timeFormat), advice)
+}
+
+// RoleTask renders the key's role and task together.
+func (s Session) RoleTask() string {
+	if s.Task == "" {
+		return s.Role
+	}
+	return s.Role + "/" + s.Task
+}
+
+// sameWorker reports whether an incoming registration describes the worker an
+// existing one already describes.
+//
+// Registrations with no identifier at all are never the same worker. Comparing
+// two empty identities as equal would silently fold a second launch into the
+// first — the exact duplicate this registry exists to catch. Matching on either
+// identifier lets a caller that learns a provider session id only after launch
+// add it to a registration made under an agent path.
+func sameWorker(existing, in Session) bool {
+	if existing.SessionID == "" && existing.AgentPath == "" {
+		return false
+	}
+	if in.SessionID == "" && in.AgentPath == "" {
+		return false
+	}
+	if existing.AgentPath != "" && existing.AgentPath == in.AgentPath {
+		return true
+	}
+	return existing.SessionID != "" && existing.SessionID == in.SessionID
 }
 
 func (e *LiveError) Unwrap() []error { return []error{ErrLive} }
@@ -70,6 +110,7 @@ func (e *LiveError) Unwrap() []error { return []error{ErrLive} }
 type Session struct {
 	Packet    string        `json:"packet"`
 	Role      string        `json:"role"`
+	Task      string        `json:"task,omitempty"`
 	Cycle     int64         `json:"cycle"`
 	Client    string        `json:"client"`
 	SessionID string        `json:"session_id,omitempty"`
@@ -144,23 +185,56 @@ func (s *Store) Record(ctx context.Context, in Session, takeover bool) (Session,
 	in.Started = now
 
 	err := s.db.Tx(ctx, func(q *store.Queries) error {
-		existing, found, err := get(ctx, q, in.Packet, in.Role, in.Cycle, now)
+		existing, found, err := get(ctx, q, in.Packet, in.Role, in.Task, in.Cycle, now)
 		if err != nil {
 			return err
 		}
 		if found {
-			sameSession := existing.SessionID == in.SessionID && existing.AgentPath == in.AgentPath
-			if existing.Liveness == LiveRunning && !sameSession && !takeover {
-				return &LiveError{Existing: existing}
-			}
-			if sameSession {
+			same := sameWorker(existing, in)
+			if same {
 				// A heartbeat or a terminal update: keep when it actually began.
 				in.Started = existing.Started
+			} else if existing.Liveness != LiveTerminal && !takeover {
+				// Live or stale both refuse. A stale incumbent has only gone
+				// quiet; wfc never observed it stop, so replacing it silently
+				// would be exactly the duplicate launch this guards against.
+				return &LiveError{Existing: existing}
+			}
+			if !same {
+				// Displacing somebody's record of a worker has to be
+				// attributable, so the displaced row is kept.
+				replacedBy := in.SessionID
+				if replacedBy == "" {
+					replacedBy = in.AgentPath
+				}
+				note := "replaced"
+				if takeover {
+					note = "takeover"
+				}
+				if err := q.ArchiveWorkerSession(ctx, store.ArchiveWorkerSessionParams{
+					PacketID:    existing.Packet,
+					Role:        existing.Role,
+					Task:        existing.Task,
+					Cycle:       existing.Cycle,
+					Client:      existing.Client,
+					SessionID:   existing.SessionID,
+					AgentPath:   existing.AgentPath,
+					Status:      existing.Status,
+					Liveness:    existing.Liveness,
+					StartedAt:   existing.Started.Format(timeFormat),
+					LastSeen:    existing.LastSeen.Format(timeFormat),
+					ReplacedAt:  now.Format(timeFormat),
+					ReplacedBy:  replacedBy,
+					ReplaceNote: note,
+				}); err != nil {
+					return err
+				}
 			}
 		}
-		return q.PutSession(ctx, store.PutSessionParams{
+		return q.PutWorkerSession(ctx, store.PutWorkerSessionParams{
 			PacketID:   in.Packet,
 			Role:       in.Role,
+			Task:       in.Task,
 			Cycle:      in.Cycle,
 			Client:     in.Client,
 			SessionID:  in.SessionID,
@@ -189,13 +263,13 @@ func (s *Store) List(ctx context.Context, packet string, all bool) ([]Session, e
 	now := s.now().UTC()
 
 	var (
-		rows []store.Session
+		rows []store.WorkerSession
 		err  error
 	)
 	if packet == "" {
-		rows, err = s.db.ListSessions(ctx)
+		rows, err = s.db.ListWorkerSessions(ctx)
 	} else {
-		rows, err = s.db.ListSessionsForPacket(ctx, packet)
+		rows, err = s.db.ListWorkerSessionsForPacket(ctx, packet)
 	}
 	if err != nil {
 		return nil, err
@@ -216,7 +290,7 @@ func (s *Store) List(ctx context.Context, packet string, all bool) ([]Session, e
 }
 
 // Get returns the session recorded for one role-task.
-func (s *Store) Get(ctx context.Context, packet, role string, cycle int64) (Session, bool, error) {
+func (s *Store) Get(ctx context.Context, packet, role, task string, cycle int64) (Session, bool, error) {
 	now := s.now().UTC()
 	var (
 		out   Session
@@ -224,15 +298,15 @@ func (s *Store) Get(ctx context.Context, packet, role string, cycle int64) (Sess
 	)
 	err := s.db.Tx(ctx, func(q *store.Queries) error {
 		var err error
-		out, found, err = get(ctx, q, packet, role, cycle, now)
+		out, found, err = get(ctx, q, packet, role, task, cycle, now)
 		return err
 	})
 	return out, found, err
 }
 
-func get(ctx context.Context, q *store.Queries, packet, role string, cycle int64, now time.Time) (Session, bool, error) {
-	row, err := q.GetSession(ctx, store.GetSessionParams{
-		PacketID: packet, Role: role, Cycle: cycle,
+func get(ctx context.Context, q *store.Queries, packet, role, task string, cycle int64, now time.Time) (Session, bool, error) {
+	row, err := q.GetWorkerSession(ctx, store.GetWorkerSessionParams{
+		PacketID: packet, Role: role, Task: task, Cycle: cycle,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -244,7 +318,7 @@ func get(ctx context.Context, q *store.Queries, packet, role string, cycle int64
 	return sess, ok, nil
 }
 
-func toSession(row store.Session, now time.Time) (Session, bool) {
+func toSession(row store.WorkerSession, now time.Time) (Session, bool) {
 	started, err := time.Parse(timeFormat, row.StartedAt)
 	if err != nil {
 		return Session{}, false
@@ -256,6 +330,7 @@ func toSession(row store.Session, now time.Time) (Session, bool) {
 	s := Session{
 		Packet:    row.PacketID,
 		Role:      row.Role,
+		Task:      row.Task,
 		Cycle:     row.Cycle,
 		Client:    row.Client,
 		SessionID: row.SessionID,

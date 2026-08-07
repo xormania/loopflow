@@ -454,19 +454,45 @@ func TestRunSeparatesRefusalFromAcceptedFailure(t *testing.T) {
 	r := newRunner(t)
 	dir := writePacket(t, "red-recorded", 3, "head-3")
 
-	// A command that appends an event and exits 0: accepted, and it recorded
-	// a failure.
+	// An ordinary failed gap review appends outcome "failed", prints
+	// GAP-REVIEW-RECORDED, and exits 0. Neither the exit code nor the marker
+	// reveals that a failure was recorded — only the appended event does.
 	advance := fmt.Sprintf(
 		`printf '%%s' '{"change_id":"pkt-1","stage":"gap-repair-required","event_count":4,"last_event_hash":"head-4"}' > %s;`+
-			`echo WORKFLOW-BLOCKED gap review failed`,
-		filepath.Join(dir, "workflow-state.json"))
+			`printf '%%s\n' '{"issue_key":"seam-parity","outcome":"failed","phase":"test-gap-review","seq":4}' >> %s;`+
+			`echo GAP-REVIEW-RECORDED`,
+		filepath.Join(dir, "workflow-state.json"), filepath.Join(dir, "workflow-events.jsonl"))
 
 	got := r.run("run", dir, "--", "sh", "-c", advance)
 	if got.code != 0 {
 		t.Fatalf("exit = %d, want 0 (%s)", got.code, got.stderr)
 	}
-	if !strings.Contains(got.stderr, "accepted-failed-review") {
-		t.Errorf("classified as %q, want accepted-failed-review", got.stderr)
+	if !strings.Contains(got.stderr, "failure-recorded") {
+		t.Errorf("classified as %q, want failure-recorded", got.stderr)
+	}
+	if strings.Contains(got.stderr, "accepted") {
+		t.Error("the recorder used Flow's word for a decision it does not own")
+	}
+}
+
+// An optional recorder must never become a precondition for the command it
+// wraps. A broken state root must not stop Flow from running.
+func TestRunStillRunsWhenTheRecorderCannotWork(t *testing.T) {
+	dir := writePacket(t, "tests-frozen", 1, "head-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(t.Context(),
+		[]string{"-root", "/dev/null/impossible", "run", dir, "--", "sh", "-c", "echo ran; exit 7"},
+		&stdout, &stderr)
+
+	if code != 7 {
+		t.Errorf("exit = %d, want the child's 7", code)
+	}
+	if !strings.Contains(stdout.String(), "ran") {
+		t.Errorf("the child did not run: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not recorded") {
+		t.Errorf("wfc did not say it failed to record: %q", stderr.String())
 	}
 }
 
@@ -477,8 +503,8 @@ func TestAttemptsGoStaleWhenThePacketMoves(t *testing.T) {
 	dir := writePacket(t, "tests-frozen", 10, "head-10")
 
 	r.run("run", dir, "--", "sh", "-c", `echo "WORKFLOW-ERROR nope" >&2; exit 2`)
-	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "current") {
-		t.Errorf("attempt not current straight after recording: %q", out)
+	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "packet unchanged since") {
+		t.Errorf("bindings not reported unchanged straight after recording: %q", out)
 	}
 
 	// The packet advances; the recorded reason is still true about its moment
@@ -487,8 +513,8 @@ func TestAttemptsGoStaleWhenThePacketMoves(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "workflow-state.json"), []byte(moved), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "superseded") {
-		t.Errorf("attempt still current after the packet moved: %q", out)
+	if out := r.mustRun("attempts", dir).stdout; !strings.Contains(out, "packet has moved since") {
+		t.Errorf("bindings still reported unchanged after the packet moved: %q", out)
 	}
 }
 
@@ -498,9 +524,12 @@ func TestAttemptsIndexesRecordedFailedEvents(t *testing.T) {
 	r := newRunner(t)
 	dir := writePacket(t, "tests-frozen", 2, "head-2")
 
-	chain := `{"issue_key":"product-negative-seam-parity","outcome":"failed","phase":"test-gap-review",` +
-		`"report":"results/grok/gap-cycle-0.md","seq":1}` + "\n" +
-		`{"issue_key":"none","outcome":"passed","phase":"test-freeze","seq":2}` + "\n"
+	// Build a real, hash-linked chain with wfc itself, then plant it.
+	r.mustRun("init", "src")
+	r.mustRun("record", "src", "test-gap-review", "-outcome", "failed",
+		"-issue-key", "product-negative-seam-parity", "-set", "report=results/grok/gap-cycle-0.md")
+	r.mustRun("record", "src", "test-freeze", "-outcome", "passed")
+	chain := r.mustRun("log", "src").stdout
 	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"), []byte(chain), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -512,6 +541,19 @@ func TestAttemptsIndexesRecordedFailedEvents(t *testing.T) {
 	}
 	if strings.Contains(out, "test-freeze") {
 		t.Errorf("a passed event was listed as a failure: %q", out)
+	}
+
+	// Unverified lines are never presented as durable evidence.
+	unhashed := `{"issue_key":"invented","outcome":"failed","phase":"test-gap-review"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"), []byte(unhashed), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bad := r.run("attempts", dir)
+	if bad.code == cli.ExitOK {
+		t.Error("attempts succeeded over an unverifiable chain")
+	}
+	if strings.Contains(bad.stdout, "invented") {
+		t.Error("an unverified line was presented as a durable failed event")
 	}
 }
 

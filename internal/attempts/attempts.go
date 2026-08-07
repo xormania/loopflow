@@ -33,21 +33,33 @@ import (
 
 // Kinds an attempt can have. Anything that conflates these makes the record
 // worse than not having it.
+// Kinds. None of these says "accepted": acceptance is Flow's word and Flow's
+// decision, and a recorder borrowing it would be claiming something it does not
+// own. These describe only what was observed — whether the command succeeded,
+// and whether the packet's chain grew.
 const (
-	// KindRefusal: the transition was refused and the packet is unchanged.
+	// KindRefusal: refused, and the packet is unchanged.
 	KindRefusal = "attempt-refusal"
-	// KindFailedReview: accepted, and it recorded a failed review. Durable in
-	// the event chain already; this row only says which command produced it.
-	KindFailedReview = "accepted-failed-review"
-	// KindFailedExecution: accepted, and it recorded a failed run.
-	KindFailedExecution = "accepted-failed-execution"
+	// KindFailureRecorded: the command succeeded in appending an event, and
+	// that event records a failure. Durable in the chain already; this row only
+	// says which command produced it.
+	KindFailureRecorded = "failure-recorded"
+	// KindTransitionRecorded: an event was appended recording a pass.
+	KindTransitionRecorded = "transition-recorded"
+	// KindNoTransition: the command succeeded and the chain did not grow — a
+	// read-only command, or one that decided nothing needed recording.
+	KindNoTransition = "no-transition"
 	// KindInfrastructure: the run could not be judged on its merits.
 	KindInfrastructure = "infrastructure-result"
-	// KindAccepted: the transition was accepted and recorded a pass.
-	KindAccepted = "accepted"
-	// KindUsage: the command was malformed — it never reached Flow's own
+	// KindUsage: the command was malformed and never reached Flow's own
 	// validation, so it says nothing about the packet.
 	KindUsage = "usage-error"
+	// KindUnclassified: it failed, printed no marker, and appended nothing.
+	// That is what a crash looks like as much as a refusal, and the two must
+	// not be conflated — so neither is claimed.
+	KindUnclassified = "unclassified-failure"
+	// KindNotRun: the command could not be started at all.
+	KindNotRun = "not-run"
 )
 
 // Exhaustiveness of a recorded reason.
@@ -100,10 +112,14 @@ type Attempt struct {
 	StderrSHA256   string   `json:"stderr_sha256,omitempty"`
 	ToolSHA256     string   `json:"tool_sha256,omitempty"`
 
-	// Current is derived at read time: whether the packet still has the
-	// bindings this attempt left it with. A superseded attempt is still true
-	// about its moment; it is simply no longer an explanation of now.
-	Current bool `json:"current"`
+	// BindingsUnchanged is derived at read time: the packet still has the event
+	// count, head hash, and stage this attempt left it with.
+	//
+	// It is deliberately not called "current". A refusal can be fixed without
+	// moving any of those three — removing an unexpected changed path appends
+	// no event — so unchanged bindings mean the packet has not moved, never
+	// that the reason still holds.
+	BindingsUnchanged bool `json:"bindings_unchanged"`
 }
 
 // Outcome is what a caller observed running the command.
@@ -116,6 +132,21 @@ type Outcome struct {
 	ToolSHA256 string
 	Before     Bindings
 	After      Bindings
+
+	// AppendedOutcome is the outcome field of the event the command appended,
+	// when it appended one. This is what classification should turn on: an
+	// ordinary failed gap review appends outcome "failed", prints
+	// GAP-REVIEW-RECORDED, and exits 0, so neither the exit code nor the marker
+	// reveals that a failure was recorded.
+	AppendedOutcome string
+
+	// AfterUnknown records that the packet could not be re-read afterwards.
+	// The before-state is not substituted in that case: reporting bindings that
+	// were never observed would be inventing evidence.
+	AfterUnknown bool
+
+	// StartErr is set when the command could not be started at all.
+	StartErr string
 }
 
 // Classify decides what an outcome was, from the exit code, the marker, and
@@ -126,49 +157,67 @@ type Outcome struct {
 // paths that appended an event and wrote state first, so the exit code alone
 // cannot tell those apart.
 func Classify(o Outcome) (kind, marker, reason, exhaustiveness string) {
-	combined := string(o.Stderr) + "\n" + string(o.Stdout)
-	marker, reason = findMarker(combined)
-	appended := o.After.Events > o.Before.Events
+	if o.StartErr != "" {
+		return KindNotRun, "", o.StartErr, ""
+	}
+	marker, reason = findMarker(string(o.Stderr))
+	appended := !o.AfterUnknown && o.After.Events > o.Before.Events
+
+	// What the appended event says outranks both the exit code and the marker.
+	// An ordinary failed gap review exits 0 and prints GAP-REVIEW-RECORDED, so
+	// classifying on those alone would call a recorded failure a success.
+	if appended {
+		switch o.AppendedOutcome {
+		case "failed", "blocked":
+			return KindFailureRecorded, marker, reason, ""
+		case "passed":
+			return KindTransitionRecorded, marker, reason, ""
+		}
+	}
 
 	switch {
-	case o.ExitCode == 0 && !appended:
-		// A read-only command, or a transition that decided nothing changed.
-		return KindAccepted, marker, reason, ""
-	case o.ExitCode == 0 && appended:
-		if marker == MarkerBlocked {
-			return KindFailedReview, marker, reason, ""
-		}
-		return KindAccepted, marker, reason, ""
 	case marker == MarkerInfra || o.ExitCode == 125:
 		return KindInfrastructure, marker, reason, ""
-	case marker == MarkerFailed || (o.ExitCode == 1 && appended):
-		return KindFailedExecution, marker, reason, ""
-	case marker == MarkerError:
-		if appended {
-			return KindFailedExecution, marker, reason, ""
-		}
+	case appended:
+		// It grew the chain but the outcome could not be read.
+		return KindTransitionRecorded, marker, reason, ""
+	case o.ExitCode == 0:
+		return KindNoTransition, marker, reason, ""
+	case marker == MarkerError || marker == MarkerFailed:
 		return KindRefusal, marker, reason, FirstFailure
-	case o.ExitCode == 2 && marker == "":
-		// Argument parsing fails before Flow's own validation runs, so this
-		// says nothing about the packet.
-		return KindUsage, "", firstLine(combined), ""
+	case looksLikeUsage(o.Stderr):
+		return KindUsage, "", firstLine(string(o.Stderr)), ""
 	default:
-		if appended {
-			return KindFailedExecution, marker, reason, ""
-		}
-		return KindRefusal, marker, reason, FirstFailure
+		// Nonzero, no marker, nothing appended. A crash looks exactly like
+		// this, so no claim is made about which it was.
+		return KindUnclassified, "", firstLine(string(o.Stderr)), ""
 	}
 }
 
-// findMarker returns the Flow marker and the message following it.
-func findMarker(text string) (marker, reason string) {
-	for _, m := range []string{MarkerError, MarkerFailed, MarkerInfra, MarkerBlocked} {
-		i := strings.Index(text, m)
-		if i < 0 {
-			continue
+// looksLikeUsage recognises an argument-parser failure, which happens before
+// Flow's own validation and so says nothing about the packet.
+func looksLikeUsage(stderr []byte) bool {
+	for _, line := range strings.Split(string(stderr), "\n") {
+		if strings.HasPrefix(line, "usage:") || strings.HasPrefix(line, "Usage:") {
+			return true
 		}
-		rest := strings.TrimSpace(firstLine(text[i+len(m):]))
-		return m, rest
+	}
+	return false
+}
+
+// findMarker returns the Flow marker and the message following it.
+//
+// Only the start of a line in stderr counts. Searching the whole of stdout and
+// stderr as a substring let quoted or example marker text steer the
+// classification, which is not a property a record of evidence should have.
+func findMarker(stderr string) (marker, reason string) {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		for _, m := range []string{MarkerError, MarkerFailed, MarkerInfra, MarkerBlocked} {
+			if strings.HasPrefix(line, m) {
+				return m, strings.TrimSpace(line[len(m):])
+			}
+		}
 	}
 	return "", ""
 }
@@ -234,7 +283,6 @@ func (s *Store) Record(ctx context.Context, o Outcome) (Attempt, error) {
 		StdoutSHA256:   canonical.SHA256Bytes(o.Stdout),
 		StderrSHA256:   canonical.SHA256Bytes(o.Stderr),
 		ToolSHA256:     o.ToolSHA256,
-		Current:        true,
 	}
 
 	id, err := attemptID(a)
@@ -291,7 +339,7 @@ func (s *Store) List(ctx context.Context, packet string, current Bindings) ([]At
 	out := make([]Attempt, 0, len(rows))
 	for _, row := range rows {
 		a := toAttempt(row)
-		a.Current = current.Head != "" &&
+		a.BindingsUnchanged = current.Head != "" &&
 			a.After.Head == current.Head &&
 			a.After.Events == current.Events &&
 			a.After.Stage == current.Stage

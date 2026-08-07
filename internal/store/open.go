@@ -59,6 +59,15 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		_ = sqldb.Close()
 		return nil, err
 	}
+	// SQLite creates the file honouring the umask, which is typically 0644.
+	// The 0700 directory already denies access, but a file that says 0600 is
+	// one fewer thing to have to reason about.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Chmod(abs+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			_ = sqldb.Close()
+			return nil, fmt.Errorf("store: restrict %s: %w", abs+suffix, err)
+		}
+	}
 
 	return &DB{Queries: New(sqldb), sql: sqldb, path: abs}, nil
 }

@@ -60,3 +60,33 @@ func TestEnsureCreatesPrivateDirectories(t *testing.T) {
 		t.Fatalf("Ensure is not idempotent: %v", err)
 	}
 }
+
+// A state root inside a checkout can invalidate packet manifest custody, so it
+// is refused rather than merely discouraged.
+func TestNewRefusesAStateRootInsideARepository(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write HEAD: %v", err)
+	}
+
+	if _, err := New(filepath.Join(repo, "proj", "state")); err == nil {
+		t.Error("New accepted a state root inside a Git work tree")
+	} else if !strings.Contains(err.Error(), "work tree") {
+		t.Errorf("error = %v, want it to name the work tree", err)
+	}
+}
+
+// A directory merely named .git is not a repository. One exists on this host
+// and is empty; treating it as a checkout would block ordinary temp paths.
+func TestNewAcceptsADirectoryNamedGitThatIsNotARepository(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := New(filepath.Join(dir, "state")); err != nil {
+		t.Errorf("New refused a path under an empty .git directory: %v", err)
+	}
+}

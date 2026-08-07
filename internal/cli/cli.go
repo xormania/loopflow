@@ -80,13 +80,14 @@ Commands:
   release <packet> -owner ID
         Drop your claim.
 
-  session <packet> -role ROLE [-cycle N] [-client C] [-session-id ID]
+  session <packet> -role ROLE [-task KIND] [-cycle N] [-client C] [-session-id ID]
         [-agent-path P] [-parent ID] [-pid N] [-status running|terminal]
         [-reason TEXT] [-ttl 30m] [-takeover]
-        Record which provider session is on a role-task. Exit 3 if a
-        different live session already holds it — that is the guard against
-        launching a second worker for work already in flight. Re-recording
-        the same session id is the heartbeat.
+        Record which provider session is on a role-task, keyed by
+        packet + role + task + cycle. Exit 3 if a different session already
+        holds it — live or stale. Stale means wfc has not heard from it, not
+        that it stopped, so replacing one needs -takeover. Re-recording the
+        same session id is the heartbeat.
 
   run <packet-dir> -- <command…>
         Run a Flow command and record the attempt: argv, exit, marker,
@@ -279,7 +280,8 @@ func (e *env) fail(err error) int {
 	var live *sessions.LiveError
 	switch {
 	case errors.As(err, &live):
-		code, classification = ExitHeld, "session-live"
+		code = ExitHeld
+		classification = "session-" + live.Existing.Liveness
 		payload["existing"] = live.Existing
 	case errors.As(err, &held):
 		code, classification = ExitHeld, "claim-held"
@@ -945,8 +947,9 @@ func cmdCheck(ctx context.Context, e *env, args []string) int {
 
 func cmdSession(ctx context.Context, e *env, args []string) int {
 	fs := e.flags("session")
-	role := fs.String("role", "", "role the session is filling (required)")
-	cycle := fs.Int64("cycle", 0, "correction cycle")
+	role := fs.String("role", "", "custody role the session is filling (required)")
+	task := fs.String("task", "", "role-task kind, e.g. gap-review, sensitivity-review, final-audit")
+	cycle := fs.Int64("cycle", 0, "your correction cycle for this role-task (not Flow's event cycle)")
 	client := fs.String("client", "", "codex, grok, claude, …")
 	sessionID := fs.String("session-id", "", "provider session id")
 	agentPath := fs.String("agent-path", "", "collaboration task path, for internal subagents")
@@ -977,6 +980,7 @@ func cmdSession(ctx context.Context, e *env, args []string) int {
 	got, err := e.sessions.Record(ctx, sessions.Session{
 		Packet:    pos[0],
 		Role:      *role,
+		Task:      *task,
 		Cycle:     *cycle,
 		Client:    *client,
 		SessionID: *sessionID,
@@ -995,8 +999,8 @@ func cmdSession(ctx context.Context, e *env, args []string) int {
 	if e.jsonOut {
 		e.writeJSON(e.out, map[string]any{"ok": true, "session": got})
 	} else {
-		fmt.Fprintf(e.out, "%s %s/%s cycle %d  %s\n",
-			got.Liveness, got.Packet, got.Role, got.Cycle, describeSession(got))
+		fmt.Fprintf(e.out, "%s %s %s cycle %d  %s\n",
+			got.Liveness, got.Packet, got.RoleTask(), got.Cycle, describeSession(got))
 	}
 	return ExitOK
 }
@@ -1035,8 +1039,8 @@ func cmdSessions(ctx context.Context, e *env, args []string) int {
 		return ExitOK
 	}
 	for _, s := range list {
-		fmt.Fprintf(e.out, "%-8s %-28s %-14s cycle %-3d %s\n",
-			s.Liveness, s.Packet, s.Role, s.Cycle, describeSession(s))
+		fmt.Fprintf(e.out, "%-8s %-28s %-22s cycle %-3d %s\n",
+			s.Liveness, s.Packet, s.RoleTask(), s.Cycle, describeSession(s))
 	}
 	return ExitOK
 }
@@ -1064,14 +1068,12 @@ func describeSession(s sessions.Session) string {
 
 // cmdRun executes a Flow command against a packet and records the attempt.
 //
-// It is deliberately transparent: output is passed through as it is captured
-// and the child's exit code becomes wfc's, so `wfc run <dir> --` can be put in
-// front of an existing invocation without changing what that invocation does.
-//
-// One process owns both the execution and the capture. A coordinator that ran
-// the command and then called wfc separately would lose the diagnostic in
-// exactly the case it is most wanted — a crash or a context loss between the
-// two.
+// The recorder is optional and must never become a precondition for the native
+// command. Everything wfc does here is best-effort and happens around the
+// child: if the state root is unusable, or the packet cannot be read, or the
+// attempt cannot be persisted, the command still runs and its exit code and
+// output still pass through untouched. wfc reports its own failure on stderr
+// and gets out of the way.
 func cmdRun(ctx context.Context, e *env, args []string) int {
 	sep := -1
 	for i, a := range args {
@@ -1098,64 +1100,78 @@ func cmdRun(ctx context.Context, e *env, args []string) int {
 	}
 	dir := pos[0]
 
-	before, err := readBindings(dir)
-	if err != nil {
-		return e.fail(err)
-	}
-
-	if err := e.open(ctx); err != nil {
-		return e.fail(err)
-	}
-	defer e.close()
+	// Best effort, before anything else can go wrong.
+	before, beforeErr := readBindings(dir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdout = io.MultiWriter(e.out, &stdout)
 	cmd.Stderr = io.MultiWriter(e.errOut, &stderr)
-	cmd.Stdin = nil
+	cmd.Stdin = os.Stdin
 
 	started := time.Now()
 	runErr := cmd.Run()
 	elapsed := time.Since(started)
 
 	exitCode := 0
+	startErr := ""
 	var exitErr *exec.ExitError
 	switch {
 	case runErr == nil:
 	case errors.As(runErr, &exitErr):
 		exitCode = exitErr.ExitCode()
 	default:
-		return e.fail(fmt.Errorf("run %s: %w", command[0], runErr))
+		// The command could not be started. Report it the way a shell would,
+		// and record that it never ran.
+		fmt.Fprintf(e.errOut, "wfc: %v\n", runErr)
+		exitCode = 127
+		startErr = runErr.Error()
 	}
 
-	// Read the packet again even when the command failed: whether it moved is
-	// what separates a refusal from an accepted failure.
-	after, err := readBindings(dir)
+	after, afterErr := readBindings(dir)
+	outcome := attempts.Outcome{
+		Argv:         command,
+		ExitCode:     exitCode,
+		Stdout:       stdout.Bytes(),
+		Stderr:       stderr.Bytes(),
+		DurationMS:   elapsed.Milliseconds(),
+		ToolSHA256:   hashToolInArgv(command),
+		Before:       before,
+		After:        after,
+		AfterUnknown: afterErr != nil,
+		StartErr:     startErr,
+	}
+	if afterErr == nil && after.Events > before.Events {
+		outcome.AppendedOutcome = readLastEventOutcome(dir)
+	}
+
+	if err := e.recordAttempt(ctx, outcome, beforeErr); err != nil {
+		fmt.Fprintf(e.errOut, "wfc: the attempt was not recorded: %v\n", err)
+	}
+	return exitCode
+}
+
+// recordAttempt persists an attempt, opening the store only now so that a
+// broken state root cannot stop the command it was wrapping.
+func (e *env) recordAttempt(ctx context.Context, o attempts.Outcome, beforeErr error) error {
+	if beforeErr != nil {
+		return fmt.Errorf("the packet could not be read: %w", beforeErr)
+	}
+	if err := e.open(ctx); err != nil {
+		return err
+	}
+	defer e.close()
+
+	attempt, err := e.attempts.Record(ctx, o)
 	if err != nil {
-		after = before
+		return err
 	}
-
-	attempt, err := e.attempts.Record(ctx, attempts.Outcome{
-		Argv:       command,
-		ExitCode:   exitCode,
-		Stdout:     stdout.Bytes(),
-		Stderr:     stderr.Bytes(),
-		DurationMS: elapsed.Milliseconds(),
-		ToolSHA256: hashToolInArgv(command),
-		Before:     before,
-		After:      after,
-	})
-	if err != nil {
-		fmt.Fprintf(e.errOut, "wfc: recording the attempt failed: %v\n", err)
-		return exitCode
-	}
-
 	if e.jsonOut {
 		e.writeJSON(e.errOut, map[string]any{"ok": true, "attempt": attempt})
 	} else {
 		fmt.Fprintf(e.errOut, "wfc: recorded %s %s (%s)\n", attempt.ID, attempt.Kind, attempt.Transition)
 	}
-	return exitCode
+	return nil
 }
 
 // --------------------------------------------------------------- attempts ---
@@ -1175,7 +1191,11 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 	if err != nil {
 		return e.fail(err)
 	}
-	failed, chainErr := readFailedEvents(dir)
+
+	// The chain is verified before anything from it is shown. Presenting
+	// unverified lines as durable evidence would be the thing this tool exists
+	// to prevent, and reading them is not proof they hold together.
+	failed, chainErr := readVerifiedFailedEvents(dir, current.Packet)
 
 	if err := e.open(ctx); err != nil {
 		return e.fail(err)
@@ -1187,15 +1207,34 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 		return e.fail(err)
 	}
 
+	var refusals, others []attempts.Attempt
+	for _, a := range list {
+		if a.Kind == attempts.KindRefusal {
+			refusals = append(refusals, a)
+			continue
+		}
+		others = append(others, a)
+	}
+
 	if e.jsonOut {
-		e.writeJSON(e.out, map[string]any{
-			"ok":                        true,
+		payload := map[string]any{
+			"ok":                        chainErr == nil,
 			"packet":                    current.Packet,
 			"bindings":                  current,
-			"last_observed_refusals":    list,
+			"chain_verified":            chainErr == nil,
 			"recorded_failed_events":    failed,
+			"observed_refusals":         refusals,
+			"other_recorded_attempts":   others,
 			"exhaustiveness_disclaimer": exhaustivenessNote,
-		})
+		}
+		if chainErr != nil {
+			payload["chain_error"] = chainErr.Error()
+			payload["recorded_failed_events"] = nil
+		}
+		e.writeJSON(e.out, payload)
+		if chainErr != nil {
+			return e.exitFor(chainErr)
+		}
 		return ExitOK
 	}
 
@@ -1203,10 +1242,12 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 	fmt.Fprintf(e.out, "stage    %s  (%d events, head %s)\n",
 		current.Stage, current.Events, short(current.Head))
 
-	fmt.Fprintf(e.out, "\nrecorded failed events — the durable ones, already in the chain\n")
-	if chainErr != nil {
-		fmt.Fprintf(e.out, "  (chain unreadable: %v)\n", chainErr)
-	} else if len(failed) == 0 {
+	fmt.Fprintf(e.out, "\nrecorded failed events — durable, and the chain verifies\n")
+	switch {
+	case chainErr != nil:
+		fmt.Fprintf(e.out, "  not shown: the chain does not verify, so nothing in it is\n")
+		fmt.Fprintf(e.out, "  presented as evidence — %v\n", chainErr)
+	case len(failed) == 0:
 		fmt.Fprintf(e.out, "  none\n")
 	}
 	for _, f := range failed {
@@ -1214,28 +1255,50 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 	}
 
 	fmt.Fprintf(e.out, "\nobserved refusals — first failed precondition only, never the full set\n")
-	if len(list) == 0 {
+	if len(refusals) == 0 {
 		fmt.Fprintf(e.out, "  none recorded; run Flow through `wfc run` to capture them\n")
-		return ExitOK
 	}
-	for _, a := range list {
-		state := "superseded"
-		if a.Current {
-			state = "current"
-		}
-		fmt.Fprintf(e.out, "  %s %-10s %-24s %s\n", a.At, state, a.Kind, a.Transition)
-		if a.Reason != "" {
-			fmt.Fprintf(e.out, "      %s %s\n", a.Marker, a.Reason)
+	for _, a := range refusals {
+		e.printAttempt(a)
+	}
+
+	if len(others) > 0 {
+		fmt.Fprintf(e.out, "\nother recorded attempts — not refusals\n")
+		for _, a := range others {
+			e.printAttempt(a)
 		}
 	}
+
 	fmt.Fprintf(e.out, "\n%s\n", exhaustivenessNote)
+	if chainErr != nil {
+		return e.exitFor(chainErr)
+	}
 	return ExitOK
+}
+
+func (e *env) printAttempt(a attempts.Attempt) {
+	state := "packet has moved since"
+	if a.BindingsUnchanged {
+		state = "packet unchanged since"
+	}
+	fmt.Fprintf(e.out, "  %s %-24s %-22s %s\n", a.At, a.Kind, a.Transition, state)
+	if a.Reason != "" {
+		fmt.Fprintf(e.out, "      %s %s\n", a.Marker, a.Reason)
+	}
+}
+
+// exitFor maps an error to its exit code without printing it again.
+func (e *env) exitFor(err error) int {
+	if errors.Is(err, events.ErrEvidenceIntegrity) {
+		return ExitIntegrity
+	}
+	return ExitFailed
 }
 
 const exhaustivenessNote = "Flow validates fail-fast: a refusal names the first unmet " +
 	"precondition, not every one. This is not a complete account of what blocks the packet."
 
-// failedEvent is a durable failure already recorded in the packet's chain.
+// failedEvent is a durable failure recorded in the packet's chain.
 type failedEvent struct {
 	Seq      int64  `json:"seq"`
 	Phase    string `json:"phase"`
@@ -1244,24 +1307,29 @@ type failedEvent struct {
 	Cycle    int64  `json:"cycle,omitempty"`
 }
 
-// readFailedEvents indexes the failures the packet already records. These are
-// the expensive blockers — an accepted transition that recorded a failed review
-// is durable evidence, unlike a refusal, which leaves no trace at all.
-func readFailedEvents(dir string) ([]failedEvent, error) {
+// readVerifiedFailedEvents indexes the failures a packet records, but only
+// after its chain verifies. Selecting lines with outcome "failed" out of a file
+// nobody checked would let unhashed or broken data be presented as durable.
+func readVerifiedFailedEvents(dir, packet string) ([]failedEvent, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "workflow-events.jsonl"))
 	if err != nil {
 		return nil, err
 	}
-	var out []failedEvent
+	var payloads [][]byte
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		obj, err := canonical.DecodeObject([]byte(line))
-		if err != nil {
-			return out, err
-		}
-		ev := events.Event(obj)
+		payloads = append(payloads, []byte(line))
+	}
+
+	chain, err := events.VerifyPayloads(packet, payloads)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []failedEvent
+	for _, ev := range chain {
 		if outcome, _ := ev.Str(events.FieldOutcome); outcome != "failed" {
 			continue
 		}
@@ -1270,14 +1338,34 @@ func readFailedEvents(dir string) ([]failedEvent, error) {
 		issue, _ := ev.Str(events.FieldIssueKey)
 		report, _ := ev.Str("report")
 		f := failedEvent{Seq: seq, Phase: phase, IssueKey: issue, Report: report}
-		if n, ok := ev["cycle"]; ok {
-			if c, ok := jsonInt(n); ok {
-				f.Cycle = c
-			}
+		if c, ok := jsonInt(ev["cycle"]); ok {
+			f.Cycle = c
 		}
 		out = append(out, f)
 	}
 	return out, nil
+}
+
+// readLastEventOutcome reads the outcome of the packet's newest event, which is
+// what says whether an accepted transition recorded a pass or a failure.
+func readLastEventOutcome(dir string) string {
+	raw, err := os.ReadFile(filepath.Join(dir, "workflow-events.jsonl"))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		obj, err := canonical.DecodeObject([]byte(lines[i]))
+		if err != nil {
+			return ""
+		}
+		outcome, _ := events.Event(obj).Str(events.FieldOutcome)
+		return outcome
+	}
+	return ""
 }
 
 // readBindings reads the packet facts an attempt is measured against.

@@ -9,22 +9,74 @@ import (
 	"context"
 )
 
-const getSession = `-- name: GetSession :one
-SELECT packet_id, role, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM sessions WHERE packet_id = ? AND role = ? AND cycle = ?
+const archiveWorkerSession = `-- name: ArchiveWorkerSession :exec
+INSERT INTO worker_session_history (
+  packet_id, role, task, cycle, client, session_id, agent_path,
+  status, liveness, started_at, last_seen, replaced_at, replaced_by, replace_note
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
-type GetSessionParams struct {
+type ArchiveWorkerSessionParams struct {
+	PacketID    string
+	Role        string
+	Task        string
+	Cycle       int64
+	Client      string
+	SessionID   string
+	AgentPath   string
+	Status      string
+	Liveness    string
+	StartedAt   string
+	LastSeen    string
+	ReplacedAt  string
+	ReplacedBy  string
+	ReplaceNote string
+}
+
+func (q *Queries) ArchiveWorkerSession(ctx context.Context, arg ArchiveWorkerSessionParams) error {
+	_, err := q.db.ExecContext(ctx, archiveWorkerSession,
+		arg.PacketID,
+		arg.Role,
+		arg.Task,
+		arg.Cycle,
+		arg.Client,
+		arg.SessionID,
+		arg.AgentPath,
+		arg.Status,
+		arg.Liveness,
+		arg.StartedAt,
+		arg.LastSeen,
+		arg.ReplacedAt,
+		arg.ReplacedBy,
+		arg.ReplaceNote,
+	)
+	return err
+}
+
+const getWorkerSession = `-- name: GetWorkerSession :one
+SELECT packet_id, role, task, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM worker_sessions
+WHERE packet_id = ? AND role = ? AND task = ? AND cycle = ?
+`
+
+type GetWorkerSessionParams struct {
 	PacketID string
 	Role     string
+	Task     string
 	Cycle    int64
 }
 
-func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (Session, error) {
-	row := q.db.QueryRowContext(ctx, getSession, arg.PacketID, arg.Role, arg.Cycle)
-	var i Session
+func (q *Queries) GetWorkerSession(ctx context.Context, arg GetWorkerSessionParams) (WorkerSession, error) {
+	row := q.db.QueryRowContext(ctx, getWorkerSession,
+		arg.PacketID,
+		arg.Role,
+		arg.Task,
+		arg.Cycle,
+	)
+	var i WorkerSession
 	err := row.Scan(
 		&i.PacketID,
 		&i.Role,
+		&i.Task,
 		&i.Cycle,
 		&i.Client,
 		&i.SessionID,
@@ -41,22 +93,67 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (Session
 	return i, err
 }
 
-const listSessions = `-- name: ListSessions :many
-SELECT packet_id, role, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM sessions ORDER BY packet_id, role, cycle
+const listWorkerSessionHistory = `-- name: ListWorkerSessionHistory :many
+SELECT history_id, packet_id, role, task, cycle, client, session_id, agent_path, status, liveness, started_at, last_seen, replaced_at, replaced_by, replace_note FROM worker_session_history
+WHERE packet_id = ? ORDER BY history_id
 `
 
-func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
-	rows, err := q.db.QueryContext(ctx, listSessions)
+func (q *Queries) ListWorkerSessionHistory(ctx context.Context, packetID string) ([]WorkerSessionHistory, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkerSessionHistory, packetID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Session{}
+	items := []WorkerSessionHistory{}
 	for rows.Next() {
-		var i Session
+		var i WorkerSessionHistory
+		if err := rows.Scan(
+			&i.HistoryID,
+			&i.PacketID,
+			&i.Role,
+			&i.Task,
+			&i.Cycle,
+			&i.Client,
+			&i.SessionID,
+			&i.AgentPath,
+			&i.Status,
+			&i.Liveness,
+			&i.StartedAt,
+			&i.LastSeen,
+			&i.ReplacedAt,
+			&i.ReplacedBy,
+			&i.ReplaceNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkerSessions = `-- name: ListWorkerSessions :many
+SELECT packet_id, role, task, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM worker_sessions ORDER BY packet_id, role, task, cycle
+`
+
+func (q *Queries) ListWorkerSessions(ctx context.Context) ([]WorkerSession, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkerSessions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkerSession{}
+	for rows.Next() {
+		var i WorkerSession
 		if err := rows.Scan(
 			&i.PacketID,
 			&i.Role,
+			&i.Task,
 			&i.Cycle,
 			&i.Client,
 			&i.SessionID,
@@ -83,22 +180,23 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 	return items, nil
 }
 
-const listSessionsForPacket = `-- name: ListSessionsForPacket :many
-SELECT packet_id, role, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM sessions WHERE packet_id = ? ORDER BY role, cycle
+const listWorkerSessionsForPacket = `-- name: ListWorkerSessionsForPacket :many
+SELECT packet_id, role, task, cycle, client, session_id, agent_path, parent, pid, status, reason, note, started_at, last_seen, ttl_seconds FROM worker_sessions WHERE packet_id = ? ORDER BY role, task, cycle
 `
 
-func (q *Queries) ListSessionsForPacket(ctx context.Context, packetID string) ([]Session, error) {
-	rows, err := q.db.QueryContext(ctx, listSessionsForPacket, packetID)
+func (q *Queries) ListWorkerSessionsForPacket(ctx context.Context, packetID string) ([]WorkerSession, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkerSessionsForPacket, packetID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Session{}
+	items := []WorkerSession{}
 	for rows.Next() {
-		var i Session
+		var i WorkerSession
 		if err := rows.Scan(
 			&i.PacketID,
 			&i.Role,
+			&i.Task,
 			&i.Cycle,
 			&i.Client,
 			&i.SessionID,
@@ -125,12 +223,12 @@ func (q *Queries) ListSessionsForPacket(ctx context.Context, packetID string) ([
 	return items, nil
 }
 
-const putSession = `-- name: PutSession :exec
-INSERT INTO sessions (
-  packet_id, role, cycle, client, session_id, agent_path, parent, pid,
+const putWorkerSession = `-- name: PutWorkerSession :exec
+INSERT INTO worker_sessions (
+  packet_id, role, task, cycle, client, session_id, agent_path, parent, pid,
   status, reason, note, started_at, last_seen, ttl_seconds
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(packet_id, role, cycle) DO UPDATE SET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(packet_id, role, task, cycle) DO UPDATE SET
   client      = excluded.client,
   session_id  = excluded.session_id,
   agent_path  = excluded.agent_path,
@@ -144,9 +242,10 @@ ON CONFLICT(packet_id, role, cycle) DO UPDATE SET
   ttl_seconds = excluded.ttl_seconds
 `
 
-type PutSessionParams struct {
+type PutWorkerSessionParams struct {
 	PacketID   string
 	Role       string
+	Task       string
 	Cycle      int64
 	Client     string
 	SessionID  string
@@ -161,10 +260,11 @@ type PutSessionParams struct {
 	TtlSeconds int64
 }
 
-func (q *Queries) PutSession(ctx context.Context, arg PutSessionParams) error {
-	_, err := q.db.ExecContext(ctx, putSession,
+func (q *Queries) PutWorkerSession(ctx context.Context, arg PutWorkerSessionParams) error {
+	_, err := q.db.ExecContext(ctx, putWorkerSession,
 		arg.PacketID,
 		arg.Role,
+		arg.Task,
 		arg.Cycle,
 		arg.Client,
 		arg.SessionID,

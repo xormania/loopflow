@@ -44,11 +44,54 @@ func New(root string) (Layout, error) {
 	if err != nil {
 		return Layout{}, fmt.Errorf("stateroot: resolve %q: %w", root, err)
 	}
+	if err := refuseInsideRepository(abs); err != nil {
+		return Layout{}, err
+	}
 	return Layout{
 		Root:      abs,
 		Database:  filepath.Join(abs, "control.sqlite"),
 		Artifacts: filepath.Join(abs, "artifacts"),
 	}, nil
+}
+
+// refuseInsideRepository rejects a state root under a Git work tree.
+//
+// A tool that writes inside a checkout can invalidate packet manifest custody
+// — a stray write to .claude/settings.local.json once cost an otherwise
+// successful RED. "wfc writes nothing into repositories" was previously true
+// only of the default configuration; -root and WFC_ROOT could still be pointed
+// at one. This makes it an enforced property instead of a habit.
+func refuseInsideRepository(root string) error {
+	for dir := root; ; {
+		if isRepository(dir) {
+			return fmt.Errorf("stateroot: %s is inside the Git work tree at %s; "+
+				"wfc must not write into a checkout, because that can invalidate "+
+				"packet manifest custody", root, dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
+// isRepository reports whether dir is the root of a Git work tree.
+//
+// The presence of something named .git is not enough — an empty directory of
+// that name exists on this host and is not a repository. This sniffs the way
+// Git does: a file is a worktree or submodule pointer, and a directory has to
+// contain a HEAD.
+func isRepository(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	if err != nil {
+		return false
+	}
+	if !info.IsDir() {
+		return true
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git", "HEAD"))
+	return err == nil
 }
 
 // Default resolves the layout for the default state root.
