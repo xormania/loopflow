@@ -294,6 +294,8 @@ func (e *env) fail(err error) int {
 	case errors.As(err, &artifactIntegrity):
 		code, classification = ExitIntegrity, artifactIntegrity.Classification()
 		payload["digest"] = artifactIntegrity.Digest
+	case errors.Is(err, events.ErrNotAChain):
+		classification = "not-a-chain"
 	case errors.As(err, &refusal):
 		classification = refusal.Classification()
 		payload["precondition"] = refusal.Precondition

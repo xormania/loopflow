@@ -11,6 +11,31 @@ import (
 	"github.com/xormania/wfc/internal/store"
 )
 
+// ErrNotAChain reports that a file is not a hash-linked event chain at all.
+//
+// This is deliberately not an integrity failure. An unhashed activity log is
+// not damaged evidence, and reporting it as such would send a reader looking
+// for corruption in a file that never claimed to be a chain.
+var ErrNotAChain = errors.New("not a hash-linked event chain")
+
+// looksLikeAChain distinguishes a chain from a file that was never one.
+func looksLikeAChain(packetID string, payloads [][]byte) error {
+	if len(payloads) == 0 {
+		return nil
+	}
+	first, err := canonical.DecodeObject(payloads[0])
+	if err != nil {
+		return nil // let the per-line checks report it precisely
+	}
+	for _, field := range []string{FieldHash, FieldSeq, FieldPrev} {
+		if _, ok := first[field]; ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s has no %s, %s, or %s field in %d events",
+		ErrNotAChain, packetID, FieldHash, FieldSeq, FieldPrev, len(payloads))
+}
+
 // Log is the append-only event chain over a control-plane database.
 type Log struct {
 	db  *store.DB
@@ -562,6 +587,10 @@ func (l *Log) Project(ctx context.Context, packetID string) (*Projection, error)
 // the exact canonical bytes it was hashed as. The decoded events are returned
 // so a caller can summarise them; on failure it reports the first bad seq.
 func VerifyPayloads(packetID string, payloads [][]byte) ([]Event, error) {
+	if err := looksLikeAChain(packetID, payloads); err != nil {
+		return nil, err
+	}
+
 	out := make([]Event, 0, len(payloads))
 	prevHash := canonical.ZeroDigest
 	var prevTime time.Time

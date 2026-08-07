@@ -514,3 +514,31 @@ func TestAttemptsIndexesRecordedFailedEvents(t *testing.T) {
 		t.Errorf("a passed event was listed as a failure: %q", out)
 	}
 }
+
+// An unhashed activity log is not damaged evidence. Reporting it as an
+// integrity failure would send a reader hunting for corruption in a file that
+// never claimed to be a chain.
+func TestCheckSeparatesNotAChainFromCorruption(t *testing.T) {
+	r := newRunner(t)
+	dir := filepath.Join(t.TempDir(), "packet")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	log := `{"time":"2026-08-04T15:49:00Z","phase":"plan","actor":"codex"}` + "\n" +
+		`{"time":"2026-08-04T15:50:00Z","phase":"probe","actor":"codex"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"), []byte(log), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := r.run("check", dir)
+	if got.code != cli.ExitFailed {
+		t.Errorf("exit = %d, want %d (not %d, which means damaged evidence)",
+			got.code, cli.ExitFailed, cli.ExitIntegrity)
+	}
+	if !strings.Contains(got.stderr, "not a hash-linked event chain") {
+		t.Errorf("stderr = %q", got.stderr)
+	}
+	if strings.Contains(got.stderr, "evidence-integrity") {
+		t.Error("a file that was never a chain was reported as damaged evidence")
+	}
+}
