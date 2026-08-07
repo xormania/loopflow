@@ -554,3 +554,70 @@ func (l *Log) Project(ctx context.Context, packetID string) (*Projection, error)
 		Events:      events,
 	}, nil
 }
+
+// VerifyPayloads checks a chain that already exists somewhere else — a native
+// workflow-events.jsonl, say — without storing anything.
+//
+// It recomputes every hash, checks every link, and requires each line to be
+// the exact canonical bytes it was hashed as. The decoded events are returned
+// so a caller can summarise them; on failure it reports the first bad seq.
+func VerifyPayloads(packetID string, payloads [][]byte) ([]Event, error) {
+	out := make([]Event, 0, len(payloads))
+	prevHash := canonical.ZeroDigest
+	var prevTime time.Time
+
+	for i, payload := range payloads {
+		seq := int64(i + 1)
+
+		obj, err := canonical.DecodeObject(payload)
+		if err != nil {
+			return nil, integrityf(packetID, seq, "line is not decodable JSON", "%v", err)
+		}
+		event := Event(obj)
+
+		reencoded, err := event.Canonical()
+		if err != nil {
+			return nil, integrityf(packetID, seq, "line is not canonically encodable", "%v", err)
+		}
+		if string(reencoded) != string(payload) {
+			return nil, integrityf(packetID, seq, "line is not in canonical form", "")
+		}
+
+		got, ok := event.Seq()
+		if !ok || got != seq {
+			return nil, integrityf(packetID, seq, "chain is not contiguous",
+				"line %d carries seq %v", i+1, obj[FieldSeq])
+		}
+
+		stored, ok := event.Hash()
+		if !ok {
+			return nil, integrityf(packetID, seq, "event has no hash", "")
+		}
+		computed, err := event.ComputeHash()
+		if err != nil {
+			return nil, integrityf(packetID, seq, "event cannot be rehashed", "%v", err)
+		}
+		if computed != stored {
+			return nil, integrityf(packetID, seq, "recomputed hash does not match the recorded hash",
+				"recomputed %s, recorded %s", computed, stored)
+		}
+
+		prev, ok := event.Prev()
+		if !ok || prev != prevHash {
+			return nil, integrityf(packetID, seq, "prev does not link to the preceding event",
+				"prev %v, preceding hash %s", obj[FieldPrev], prevHash)
+		}
+
+		eventTime, err := event.Time()
+		if err != nil {
+			return nil, integrityf(packetID, seq, "event time is unreadable", "%v", err)
+		}
+		if i > 0 && eventTime.Before(prevTime) {
+			return nil, integrityf(packetID, seq, "event time decreases", "")
+		}
+
+		prevHash, prevTime = stored, eventTime
+		out = append(out, event)
+	}
+	return out, nil
+}

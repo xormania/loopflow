@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -288,49 +287,51 @@ func TestClaimIsExclusive(t *testing.T) {
 	r.mustRun("claim", "p1", "-owner", "harness-2")
 }
 
-// `wfc next` is a work queue pop: concurrent pullers never get the same packet.
-func TestNextHandsOutEachPacketOnce(t *testing.T) {
+// `wfc check` verifies a native packet where it lies, storing nothing.
+// flow-workflow.py owns those packets; wfc reading one must not become wfc
+// claiming it.
+func TestCheckVerifiesANativePacketInPlace(t *testing.T) {
 	r := newRunner(t)
-	const packets = 5
-	for i := 0; i < packets; i++ {
-		r.mustRun("init", "pkt"+strconv.Itoa(i))
+	r.mustRun("init", "p1")
+	r.mustRun("record", "p1", "red", "-outcome", "failed")
+	r.mustRun("record", "p1", "test-freeze", "-outcome", "passed")
+
+	// wfc's own output is the native format, so it round-trips through a file.
+	dir := filepath.Join(t.TempDir(), "packet")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonl := filepath.Join(dir, "workflow-events.jsonl")
+	if err := os.WriteFile(jsonl, []byte(r.mustRun("log", "p1").stdout), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 
-	const pullers = 12
-	type pull struct {
-		code   int
-		packet string
+	got := r.json("check", dir)
+	if got["verified"] != true {
+		t.Errorf("check = %v", got)
 	}
-	results := make(chan pull, pullers)
-	start := make(chan struct{})
-	for i := 0; i < pullers; i++ {
-		go func(i int) {
-			<-start
-			got := r.run("next", "-owner", "h"+strconv.Itoa(i))
-			results <- pull{code: got.code, packet: strings.SplitN(got.stdout, "\n", 2)[0]}
-		}(i)
+	if n, _ := got["events"].(float64); n != 3 {
+		t.Errorf("events = %v, want 3", got["events"])
 	}
-	close(start)
-
-	seen := map[string]bool{}
-	handed := 0
-	for i := 0; i < pullers; i++ {
-		got := <-results
-		if got.code != cli.ExitOK {
-			continue
-		}
-		handed++
-		if seen[got.packet] {
-			t.Errorf("packet %s was handed out twice", got.packet)
-		}
-		seen[got.packet] = true
-	}
-	if handed != packets {
-		t.Errorf("handed out %d packets, want %d", handed, packets)
+	phases, _ := got["phases"].([]any)
+	if len(phases) != 3 || phases[0] != "init" || phases[2] != "test-freeze" {
+		t.Errorf("phases = %v", got["phases"])
 	}
 
-	// Nothing left to pick up.
-	if got := r.run("next", "-owner", "late"); got.code == cli.ExitOK {
-		t.Error("next handed out a packet when everything was claimed")
+	// A single altered byte is caught, and named by seq.
+	raw, err := os.ReadFile(jsonl)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	tampered := strings.Replace(string(raw), `"outcome":"failed"`, `"outcome":"passed"`, 1)
+	if err := os.WriteFile(jsonl, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bad := r.run("check", dir)
+	if bad.code != cli.ExitIntegrity {
+		t.Errorf("exit = %d, want %d", bad.code, cli.ExitIntegrity)
+	}
+	if !strings.Contains(bad.stderr, "event 2") {
+		t.Errorf("stderr = %q, want it to name the failing seq", bad.stderr)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/xormania/wfc/internal/artifacts"
@@ -74,9 +75,9 @@ Commands:
   release <packet> -owner ID
         Drop your claim.
 
-  next -owner ID [-ttl 15m] [-note TEXT]
-        Claim the oldest unclaimed packet and print its id. Exit 1 if there
-        is nothing to pick up.
+  check <packet-dir>
+        Verify a native Flow packet's workflow-events.jsonl in place:
+        recompute every hash and link. Reads only; nothing is stored.
 
   version
 
@@ -146,9 +147,9 @@ func init() {
 		"verify":  cmdVerify,
 		"put":     cmdPut,
 		"get":     cmdGet,
+		"check":   cmdCheck,
 		"claim":   cmdClaim,
 		"release": cmdRelease,
-		"next":    cmdNext,
 	}
 }
 
@@ -825,43 +826,6 @@ func cmdRelease(ctx context.Context, e *env, args []string) int {
 	return ExitOK
 }
 
-func cmdNext(ctx context.Context, e *env, args []string) int {
-	fs := e.flags("next")
-	owner := fs.String("owner", "", "who is picking work up (required)")
-	note := fs.String("note", "", "what you are doing with it")
-	ttl := fs.Duration("ttl", claims.DefaultTTL, "how long the claim lasts")
-	pos, err := parseArgs(fs, args)
-	if err != nil {
-		return ExitUsage
-	}
-	if len(pos) != 0 {
-		return e.usage(errors.New("next takes no positional arguments"))
-	}
-	if *owner == "" {
-		return e.usage(errors.New("next requires -owner"))
-	}
-
-	if err := e.open(ctx); err != nil {
-		return e.fail(err)
-	}
-	defer e.close()
-
-	claim, found, err := e.claims.Next(ctx, *owner, *note, *ttl)
-	if err != nil {
-		return e.fail(err)
-	}
-	if !found {
-		if e.jsonOut {
-			e.writeJSON(e.out, map[string]any{"ok": false, "available": false})
-		} else {
-			fmt.Fprintln(e.errOut, "wfc: nothing available to pick up")
-		}
-		return ExitFailed
-	}
-	e.reportClaim(claim, "claimed")
-	return ExitOK
-}
-
 func (e *env) reportClaim(c claims.Claim, verb string) {
 	if e.jsonOut {
 		e.writeJSON(e.out, map[string]any{"ok": true, "claim": c})
@@ -871,4 +835,68 @@ func (e *env) reportClaim(c claims.Claim, verb string) {
 	// works without any parsing.
 	fmt.Fprintln(e.out, c.Packet)
 	fmt.Fprintf(e.out, "%s by %s until %s\n", verb, c.Owner, c.Expires.Format("2006-01-02T15:04:05Z"))
+}
+
+// ------------------------------------------------------------------ check ---
+
+// cmdCheck verifies a native Flow packet where it lies. It stores nothing:
+// flow-workflow.py owns that packet's state and acceptance, and wfc reading it
+// must not turn into wfc claiming it.
+func cmdCheck(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("check")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("check takes exactly one packet directory"))
+	}
+	dir := pos[0]
+
+	raw, err := os.ReadFile(filepath.Join(dir, "workflow-events.jsonl"))
+	if err != nil {
+		return e.fail(err)
+	}
+	var payloads [][]byte
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		payloads = append(payloads, []byte(line))
+	}
+
+	packet := filepath.Base(filepath.Clean(dir))
+	chain, err := events.VerifyPayloads(packet, payloads)
+	if err != nil {
+		return e.fail(err)
+	}
+
+	phases := make([]string, 0, len(chain))
+	for _, ev := range chain {
+		phase, _ := ev.Str(events.FieldPhase)
+		phases = append(phases, phase)
+	}
+	var lastPhase, lastOutcome, lastTime, lastHash string
+	if n := len(chain); n > 0 {
+		lastPhase, _ = chain[n-1].Str(events.FieldPhase)
+		lastOutcome, _ = chain[n-1].Str(events.FieldOutcome)
+		lastTime, _ = chain[n-1].Str(events.FieldTime)
+		lastHash, _ = chain[n-1].Hash()
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{
+			"ok": true, "packet": packet, "events": len(chain), "verified": true,
+			"phases": phases,
+			"last": map[string]any{
+				"phase": lastPhase, "outcome": lastOutcome, "time": lastTime, "hash": lastHash,
+			},
+		})
+	} else {
+		fmt.Fprintf(e.out, "%s: %d events, chain verified\n", packet, len(chain))
+		fmt.Fprintf(e.out, "phases  %s\n", strings.Join(phases, " → "))
+		fmt.Fprintf(e.out, "last    %s/%s  %s\n", orDash(lastPhase), orDash(lastOutcome), lastTime)
+		fmt.Fprintf(e.out, "hash    %s\n", lastHash)
+	}
+	return ExitOK
 }
