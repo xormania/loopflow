@@ -43,3 +43,20 @@ type PacketState struct {
 	LastSeq     int64
 	LastHash    string
 }
+
+type Session struct {
+	PacketID   string
+	Role       string
+	Cycle      int64
+	Client     string
+	SessionID  string
+	AgentPath  string
+	Parent     string
+	Pid        int64
+	Status     string
+	Reason     string
+	Note       string
+	StartedAt  string
+	LastSeen   string
+	TtlSeconds int64
+}

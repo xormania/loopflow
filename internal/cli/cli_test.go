@@ -335,3 +335,67 @@ func TestCheckVerifiesANativePacketInPlace(t *testing.T) {
 		t.Errorf("stderr = %q, want it to name the failing seq", bad.stderr)
 	}
 }
+
+// The registry answers "is the worker I launched still alive, and what do I
+// resume?" — the question whose absence cost a duplicate Grok audit.
+func TestSessionGuardsAgainstADuplicateLaunch(t *testing.T) {
+	r := newRunner(t)
+	const packet = "g1-plan-authority-refreeze-1"
+
+	r.mustRun("session", packet, "-role", "auditor", "-cycle", "3",
+		"-client", "grok", "-session-id", "sess-original")
+
+	// About to launch a replacement: refused, and told what to resume instead.
+	dup := r.run("session", packet, "-role", "auditor", "-cycle", "3",
+		"-client", "grok", "-session-id", "sess-replacement")
+	if dup.code != cli.ExitHeld {
+		t.Fatalf("exit = %d, want %d", dup.code, cli.ExitHeld)
+	}
+	if !strings.Contains(dup.stderr, "sess-original") {
+		t.Errorf("stderr = %q, want the incumbent session id", dup.stderr)
+	}
+
+	// Re-recording the same session is the heartbeat.
+	r.mustRun("session", packet, "-role", "auditor", "-cycle", "3",
+		"-client", "grok", "-session-id", "sess-original")
+
+	// A different role is unaffected.
+	r.mustRun("session", packet, "-role", "test_author", "-cycle", "0",
+		"-client", "codex", "-agent-path", "/root/g1_plan_test_author_refreeze")
+
+	list := r.mustRun("sessions", packet).stdout
+	if !strings.Contains(list, "sess-original") || !strings.Contains(list, "/root/g1_plan_test_author_refreeze") {
+		t.Errorf("sessions = %q", list)
+	}
+
+	// Terminal sessions drop out of the default view but stay on record.
+	r.mustRun("session", packet, "-role", "auditor", "-cycle", "3",
+		"-client", "grok", "-session-id", "sess-original",
+		"-status", "terminal", "-reason", "end_turn")
+	if got := r.mustRun("sessions", packet).stdout; strings.Contains(got, "sess-original") {
+		t.Errorf("terminal session still listed: %q", got)
+	}
+	if got := r.mustRun("sessions", packet, "-all").stdout; !strings.Contains(got, "end_turn") {
+		t.Errorf("-all did not show the terminal session: %q", got)
+	}
+
+	// Once terminal, the replacement is free to take the role-task.
+	r.mustRun("session", packet, "-role", "auditor", "-cycle", "3",
+		"-client", "grok", "-session-id", "sess-replacement")
+}
+
+// -takeover is for when the caller has proven the old process dead by means
+// wfc cannot see.
+func TestSessionTakeover(t *testing.T) {
+	r := newRunner(t)
+	r.mustRun("session", "p1", "-role", "auditor", "-client", "grok", "-session-id", "old")
+
+	if got := r.run("session", "p1", "-role", "auditor", "-client", "grok", "-session-id", "new"); got.code != cli.ExitHeld {
+		t.Fatalf("exit = %d, want %d", got.code, cli.ExitHeld)
+	}
+	r.mustRun("session", "p1", "-role", "auditor", "-client", "grok", "-session-id", "new", "-takeover")
+
+	if got := r.mustRun("sessions", "p1").stdout; !strings.Contains(got, "new") {
+		t.Errorf("sessions = %q", got)
+	}
+}

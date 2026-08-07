@@ -20,6 +20,7 @@ type Querier interface {
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
 	GetPacket(ctx context.Context, packetID string) (Packet, error)
 	GetPacketState(ctx context.Context, packetID string) (PacketState, error)
+	GetSession(ctx context.Context, arg GetSessionParams) (Session, error)
 	// Content is immutable and named by its digest, so a repeated put of
 	// identical bytes is a no-op rather than a conflict.
 	InsertArtifact(ctx context.Context, arg InsertArtifactParams) error
@@ -28,11 +29,14 @@ type Querier interface {
 	ListClaims(ctx context.Context) ([]Claim, error)
 	ListEvents(ctx context.Context, packetID string) ([]Event, error)
 	ListPackets(ctx context.Context) ([]Packet, error)
+	ListSessions(ctx context.Context) ([]Session, error)
+	ListSessionsForPacket(ctx context.Context, packetID string) ([]Session, error)
 	// Packets nobody currently holds: never claimed, or claimed by a harness whose
 	// lease has run out. Times are stored fixed-width so this string comparison is
 	// a chronological one.
 	ListUnclaimedPackets(ctx context.Context, expiresAt string) ([]string, error)
 	PutClaim(ctx context.Context, arg PutClaimParams) error
+	PutSession(ctx context.Context, arg PutSessionParams) error
 	// The projected current state is replaced wholesale in the same transaction
 	// that appends the event producing it. Events are never updated; this row is
 	// a derived view and carries the seq and hash it was derived from so a

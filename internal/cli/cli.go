@@ -17,11 +17,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xormania/wfc/internal/artifacts"
 	"github.com/xormania/wfc/internal/canonical"
 	"github.com/xormania/wfc/internal/claims"
 	"github.com/xormania/wfc/internal/events"
+	"github.com/xormania/wfc/internal/sessions"
 	"github.com/xormania/wfc/internal/stateroot"
 	"github.com/xormania/wfc/internal/store"
 )
@@ -74,6 +76,17 @@ Commands:
 
   release <packet> -owner ID
         Drop your claim.
+
+  session <packet> -role ROLE [-cycle N] [-client C] [-session-id ID]
+        [-agent-path P] [-parent ID] [-pid N] [-status running|terminal]
+        [-reason TEXT] [-ttl 30m] [-takeover]
+        Record which provider session is on a role-task. Exit 3 if a
+        different live session already holds it — that is the guard against
+        launching a second worker for work already in flight. Re-recording
+        the same session id is the heartbeat.
+
+  sessions [<packet>] [-all]
+        Which sessions are running, stale, or terminal, and the id to resume.
 
   check <packet-dir>
         Verify a native Flow packet's workflow-events.jsonl in place:
@@ -140,16 +153,18 @@ func init() {
 	// Declared in init to avoid an initialisation cycle: each command closes
 	// over env, which references this map through Run.
 	commands = map[string]commandFunc{
-		"init":    cmdInit,
-		"status":  cmdStatus,
-		"record":  cmdRecord,
-		"log":     cmdLog,
-		"verify":  cmdVerify,
-		"put":     cmdPut,
-		"get":     cmdGet,
-		"check":   cmdCheck,
-		"claim":   cmdClaim,
-		"release": cmdRelease,
+		"init":     cmdInit,
+		"status":   cmdStatus,
+		"record":   cmdRecord,
+		"log":      cmdLog,
+		"verify":   cmdVerify,
+		"put":      cmdPut,
+		"get":      cmdGet,
+		"check":    cmdCheck,
+		"claim":    cmdClaim,
+		"session":  cmdSession,
+		"sessions": cmdSessions,
+		"release":  cmdRelease,
 	}
 }
 
@@ -160,11 +175,12 @@ type env struct {
 	root    string
 	jsonOut bool
 
-	layout stateroot.Layout
-	db     *store.DB
-	log    *events.Log
-	art    *artifacts.Store
-	claims *claims.Store
+	layout   stateroot.Layout
+	db       *store.DB
+	log      *events.Log
+	art      *artifacts.Store
+	claims   *claims.Store
+	sessions *sessions.Store
 }
 
 // flags returns a FlagSet that also accepts the global flags, so that both
@@ -223,6 +239,7 @@ func (e *env) open(ctx context.Context) error {
 	}
 	e.art = art
 	e.claims = claims.New(db)
+	e.sessions = sessions.New(db)
 	return nil
 }
 
@@ -242,7 +259,11 @@ func (e *env) fail(err error) int {
 	var artifactIntegrity *artifacts.IntegrityError
 	var refusal *events.RefusalError
 	var held *claims.HeldError
+	var live *sessions.LiveError
 	switch {
+	case errors.As(err, &live):
+		code, classification = ExitHeld, "session-live"
+		payload["existing"] = live.Existing
 	case errors.As(err, &held):
 		code, classification = ExitHeld, "claim-held"
 		payload["packet"] = held.Packet
@@ -899,4 +920,123 @@ func cmdCheck(ctx context.Context, e *env, args []string) int {
 		fmt.Fprintf(e.out, "hash    %s\n", lastHash)
 	}
 	return ExitOK
+}
+
+// ---------------------------------------------------------------- sessions --
+
+func cmdSession(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("session")
+	role := fs.String("role", "", "role the session is filling (required)")
+	cycle := fs.Int64("cycle", 0, "correction cycle")
+	client := fs.String("client", "", "codex, grok, claude, …")
+	sessionID := fs.String("session-id", "", "provider session id")
+	agentPath := fs.String("agent-path", "", "collaboration task path, for internal subagents")
+	parent := fs.String("parent", "", "parent session id")
+	pid := fs.Int64("pid", 0, "process handle, if one is being held")
+	status := fs.String("status", sessions.StatusRunning, "running or terminal")
+	reason := fs.String("reason", "", "terminal reason, e.g. end_turn or max turns reached")
+	note := fs.String("note", "", "free text")
+	ttl := fs.Duration("ttl", sessions.DefaultTTL, "how long to assume it is live without being seen")
+	takeover := fs.Bool("takeover", false, "replace a live session you have proven terminal")
+
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("session takes exactly one packet id"))
+	}
+	if *role == "" {
+		return e.usage(errors.New("session requires -role"))
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	got, err := e.sessions.Record(ctx, sessions.Session{
+		Packet:    pos[0],
+		Role:      *role,
+		Cycle:     *cycle,
+		Client:    *client,
+		SessionID: *sessionID,
+		AgentPath: *agentPath,
+		Parent:    *parent,
+		PID:       *pid,
+		Status:    *status,
+		Reason:    *reason,
+		Note:      *note,
+		TTL:       *ttl,
+	}, *takeover)
+	if err != nil {
+		return e.fail(err)
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{"ok": true, "session": got})
+	} else {
+		fmt.Fprintf(e.out, "%s %s/%s cycle %d  %s\n",
+			got.Liveness, got.Packet, got.Role, got.Cycle, describeSession(got))
+	}
+	return ExitOK
+}
+
+func cmdSessions(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("sessions")
+	all := fs.Bool("all", false, "include sessions already recorded terminal")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) > 1 {
+		return e.usage(errors.New("sessions takes at most one packet id"))
+	}
+	packet := ""
+	if len(pos) == 1 {
+		packet = pos[0]
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	list, err := e.sessions.List(ctx, packet, *all)
+	if err != nil {
+		return e.fail(err)
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{"ok": true, "sessions": list})
+		return ExitOK
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(e.out, "no sessions recorded")
+		return ExitOK
+	}
+	for _, s := range list {
+		fmt.Fprintf(e.out, "%-8s %-28s %-14s cycle %-3d %s\n",
+			s.Liveness, s.Packet, s.Role, s.Cycle, describeSession(s))
+	}
+	return ExitOK
+}
+
+// describeSession renders the identity to resume, and how long ago it spoke.
+func describeSession(s sessions.Session) string {
+	id := s.SessionID
+	if id == "" {
+		id = s.AgentPath
+	}
+	if id == "" {
+		id = "(no id)"
+	}
+	out := fmt.Sprintf("%s %s", s.Client, id)
+	if s.Liveness != sessions.LiveTerminal {
+		out += fmt.Sprintf("  seen %s ago", time.Since(s.LastSeen).Round(time.Second))
+	}
+	if s.Reason != "" {
+		out += "  " + s.Reason
+	}
+	return out
 }
