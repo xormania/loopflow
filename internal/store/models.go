@@ -25,6 +25,7 @@ type Event struct {
 type Packet struct {
 	PacketID  string
 	CreatedAt string
+	Objective string
 }
 
 type PacketState struct {

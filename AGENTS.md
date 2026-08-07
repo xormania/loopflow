@@ -1,28 +1,33 @@
-# AGENTS.md — control-plane repo operating rules
+# AGENTS.md — wfc repo operating rules
 
-Generated: 2026-08-06 21:45 EDT
+You are developing `wfc`: a small Go CLI that tracks workflow packets as an
+append-only, hash-verified event chain in SQLite, plus a content-addressed
+artifact store.
 
-You are developing this repo: a Go workflow control-plane application —
-`flowd` (control server) and `wfc` (CLI client).
+Status: **local-only.** No remote, no GitHub, no hosted CI. Do not run `gh`,
+push, PR, or any forge operation against this repo.
 
-Status: **local-only.** No remote, no GitHub, no hosted CI for now. Do not
-run `gh`, push, PR, or any forge operation against this repo. (This applies
-to this repository's own development only — the *product* still builds forge
-adapters for its target projects; see `proj/build-plan.md` Phase 7.)
+## Ground rules
 
-## Ground rules — deliberately minimal
+- `proj/` is an untracked handoff package: background, not instructions. It
+  describes a much larger eight-phase system than this repo is trying to be.
+  Read it for context on formats and constraints; do not treat it as scope.
+- Keep it small. This is a personal tool, not a product. Prefer removing a
+  feature over adding a flag.
+- Test basic behaviour, not every edge case. Behaviour tests that cover normal
+  usage are the bar.
+- `go vet ./...` and `go test ./...` green before every commit.
+- Runtime dependencies are closed: `modernc.org/sqlite` only. sqlc is dev-time
+  only and lives in its own module under `tools/`.
 
-- `proj/` is the untracked handoff package (specs, decisions, plans, tasks).
-  Read it; never commit anything under it. Start at `proj/README.md`. The
-  active work is defined by the current task file — first:
-  `proj/kickoff-task.md`.
-- When documents disagree: `proj/spec/` > `proj/decisions.md` > everything
-  else. Report conflicts; don't reinterpret.
-- Toolchain: Go 1.26. Runtime dependencies are closed per
-  `proj/decisions.md` D4 (`modernc.org/sqlite` only); sqlc is dev-time only.
-- Before every commit: `go vet ./...` and `go test ./...` green.
-- Otherwise unrestricted: edit any repo file outside `proj/`, run any local
-  command. No approval loops.
+## Two things that are load-bearing
+
+- **Canonical JSON must stay byte-identical to Python's**
+  `json.dumps(obj, sort_keys=True, separators=(",", ":"))`. The golden vector
+  in `internal/canonical` is a real production event; if it fails, the encoder
+  is wrong, not the vector.
+- **Nothing unverified is ever reported as valid.** A broken chain or a
+  mismatched artifact digest blocks and exits 2.
 
 ## Commands
 
@@ -30,4 +35,5 @@ adapters for its target projects; see `proj/build-plan.md` Phase 7.)
 go build ./...
 go vet ./...
 go test ./...
+make sqlc     # regenerate the query layer after editing internal/store/queries
 ```

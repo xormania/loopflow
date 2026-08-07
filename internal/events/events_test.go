@@ -40,7 +40,7 @@ func newTestLog(t *testing.T) (*events.Log, *store.DB) {
 	}
 
 	log := events.NewWithClock(db, fixedClock())
-	if err := log.CreatePacket(t.Context(), testPacket); err != nil {
+	if err := log.CreatePacket(t.Context(), testPacket, "test packet"); err != nil {
 		t.Fatalf("create packet: %v", err)
 	}
 	return log, db
@@ -658,8 +658,8 @@ func TestProjectUnknownPacket(t *testing.T) {
 
 func TestCreatePacketRefusesDuplicates(t *testing.T) {
 	log, _ := newTestLog(t)
-	assertRefusal(t, log.CreatePacket(t.Context(), testPacket), "does not already exist")
-	assertRefusal(t, log.CreatePacket(t.Context(), ""), "not empty")
+	assertRefusal(t, log.CreatePacket(t.Context(), testPacket, "test packet"), "does not already exist")
+	assertRefusal(t, log.CreatePacket(t.Context(), "", ""), "not empty")
 }
 
 func TestErrorsCarryTheirClassification(t *testing.T) {

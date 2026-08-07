@@ -40,7 +40,7 @@ type Projection struct {
 }
 
 // CreatePacket registers a packet so events can be appended to it.
-func (l *Log) CreatePacket(ctx context.Context, packetID string) error {
+func (l *Log) CreatePacket(ctx context.Context, packetID, objective string) error {
 	if packetID == "" {
 		return &RefusalError{
 			Precondition: "packet id is not empty",
@@ -62,6 +62,7 @@ func (l *Log) CreatePacket(ctx context.Context, packetID string) error {
 		return q.CreatePacket(ctx, store.CreatePacketParams{
 			PacketID:  packetID,
 			CreatedAt: FormatTime(l.now()),
+			Objective: objective,
 		})
 	})
 }

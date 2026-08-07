@@ -1,19 +1,15 @@
-// Command wfc is the workflow control-plane CLI client.
+// Command wfc is the workflow control-plane command line.
 //
-// It reaches the daemon only through the unix-socket API (decisions.md D3,
-// D5); it never opens the database or touches the artifact store's disk
-// layout. This is the Phase 1 skeleton: it prints its version and exits.
+// It opens the SQLite state directly — there is no server to start first.
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
+
+	"github.com/xormania/wfc/internal/cli"
 )
 
-// version is the build identity reported by both binaries. Phase 2 replaces
-// this with a real version/health endpoint.
-const version = "0.0.0-dev"
-
 func main() {
-	fmt.Fprintf(os.Stdout, "wfc %s\n", version)
+	os.Exit(cli.Run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }

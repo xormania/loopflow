@@ -10,32 +10,33 @@ import (
 )
 
 const createPacket = `-- name: CreatePacket :exec
-INSERT INTO packets (packet_id, created_at) VALUES (?, ?)
+INSERT INTO packets (packet_id, created_at, objective) VALUES (?, ?, ?)
 `
 
 type CreatePacketParams struct {
 	PacketID  string
 	CreatedAt string
+	Objective string
 }
 
 func (q *Queries) CreatePacket(ctx context.Context, arg CreatePacketParams) error {
-	_, err := q.db.ExecContext(ctx, createPacket, arg.PacketID, arg.CreatedAt)
+	_, err := q.db.ExecContext(ctx, createPacket, arg.PacketID, arg.CreatedAt, arg.Objective)
 	return err
 }
 
 const getPacket = `-- name: GetPacket :one
-SELECT packet_id, created_at FROM packets WHERE packet_id = ?
+SELECT packet_id, created_at, objective FROM packets WHERE packet_id = ?
 `
 
 func (q *Queries) GetPacket(ctx context.Context, packetID string) (Packet, error) {
 	row := q.db.QueryRowContext(ctx, getPacket, packetID)
 	var i Packet
-	err := row.Scan(&i.PacketID, &i.CreatedAt)
+	err := row.Scan(&i.PacketID, &i.CreatedAt, &i.Objective)
 	return i, err
 }
 
 const listPackets = `-- name: ListPackets :many
-SELECT packet_id, created_at FROM packets ORDER BY packet_id
+SELECT packet_id, created_at, objective FROM packets ORDER BY created_at, packet_id
 `
 
 func (q *Queries) ListPackets(ctx context.Context) ([]Packet, error) {
@@ -47,7 +48,7 @@ func (q *Queries) ListPackets(ctx context.Context) ([]Packet, error) {
 	items := []Packet{}
 	for rows.Next() {
 		var i Packet
-		if err := rows.Scan(&i.PacketID, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&i.PacketID, &i.CreatedAt, &i.Objective); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
