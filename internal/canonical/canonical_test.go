@@ -3,7 +3,6 @@ package canonical_test
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,14 +12,10 @@ import (
 	"github.com/xormania/wfc/internal/canonical"
 )
 
-// bs is a single backslash. esc builds the six-character \uXXXX escape text
-// that the canonical form is required to emit. Expected values are assembled
-// this way rather than written as Go escape sequences so that what the test
-// compares against is unambiguous in the source, and so that an encoder
-// emitting uppercase hex still fails.
-const bs = `\`
-
-func esc(v uint16) string { return fmt.Sprintf("%su%04x", bs, v) }
+// Expected values below are written with doubled backslashes in interpreted
+// string literals: "\\u00e9" is the six-character escape text é, not the
+// character é. Getting that backwards is the exact bug these tests exist to
+// catch, so the two are never spelled the same way here.
 
 // goldenVectorEvent is a real native event observed in production and recorded
 // in environment-facts.md 3c / phase-1-foundation.md. It is reproduced here
@@ -150,9 +145,9 @@ func TestKeyOrdering(t *testing.T) {
 	// "" < "0" < "A" < "B" < "_" < "a" < "ab" < "b" < "~"
 	//    < U+00E9 < U+4E2D < U+1F600
 	want := `{"":1,"0":1,"A":1,"B":1,"_":1,"a":1,"ab":1,"b":1,"~":1,` +
-		`"` + esc(0x00e9) + `":1,` +
-		`"` + esc(0x4e2d) + `":1,` +
-		`"` + esc(0xd83d) + esc(0xde00) + `":1}`
+		"\"\\u00e9\":1," +
+		"\"\\u4e2d\":1," +
+		"\"\\ud83d\\ude00\":1}"
 
 	got, err := canonical.Marshal(obj)
 	if err != nil {
@@ -171,22 +166,22 @@ func TestNonASCIIEscaping(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"latin-1 supplement", "café", `"caf` + esc(0x00e9) + `"`},
-		{"cjk", "中文", `"` + esc(0x4e2d) + esc(0x6587) + `"`},
-		{"emoji surrogate pair", "😀", `"` + esc(0xd83d) + esc(0xde00) + `"`},
-		{"clef surrogate pair", "𝄞", `"` + esc(0xd834) + esc(0xdd1e) + `"`},
-		{"nul", string(rune(0x00)), `"` + esc(0x0000) + `"`},
-		{"unit separator", string(rune(0x1f)), `"` + esc(0x001f) + `"`},
+		{"latin-1 supplement", "café", "\"caf\\u00e9\""},
+		{"cjk", "中文", "\"\\u4e2d\\u6587\""},
+		{"emoji surrogate pair", "😀", "\"\\ud83d\\ude00\""},
+		{"clef surrogate pair", "𝄞", "\"\\ud834\\udd1e\""},
+		{"nul", string(rune(0x00)), "\"\\u0000\""},
+		{"unit separator", string(rune(0x1f)), "\"\\u001f\""},
 		// DEL is outside Python's literal range 0x20-0x7E but inside the range
 		// Go's encoder emits raw, so it is the sharpest single-byte case.
-		{"del", string(rune(0x7f)), `"` + esc(0x007f) + `"`},
-		{"nbsp", string(rune(0xa0)), `"` + esc(0x00a0) + `"`},
-		{"short escapes", "\n\t\r\b\f", `"` + bs + `n` + bs + `t` + bs + `r` + bs + `b` + bs + `f"`},
-		{"quote and backslash", `a"b` + bs + `c`, `"a` + bs + `"b` + bs + bs + `c"`},
+		{"del", string(rune(0x7f)), "\"\\u007f\""},
+		{"nbsp", string(rune(0xa0)), "\"\\u00a0\""},
+		{"short escapes", "\n\t\r\b\f", `"\n\t\r\b\f"`},
+		{"quote and backslash", `a"b\c`, `"a\"b\\c"`},
 		{"printable ascii stays literal", "plain ASCII ~!@#$%^*()_+", `"plain ASCII ~!@#$%^*()_+"`},
 		{"boundary 0x20 and 0x7e", " ~", `" ~"`},
 		{"mixed", "a" + string(rune(0x00)) + "b" + string(rune(0x7f)) + "c😀",
-			`"a` + esc(0x0000) + `b` + esc(0x007f) + `c` + esc(0xd83d) + esc(0xde00) + `"`},
+			"\"a\\u0000b\\u007fc\\ud83d\\ude00\""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,7 +199,7 @@ func TestNonASCIIEscaping(t *testing.T) {
 // Test item 6: Go's default HTML escaping of < > & must be disabled.
 func TestHTMLEscapingDisabled(t *testing.T) {
 	in := `<script>&"</script>`
-	want := `"<script>&` + bs + `"</script>"`
+	want := `"<script>&\"</script>"`
 
 	got, err := canonical.Marshal(in)
 	if err != nil {
@@ -363,7 +358,7 @@ func TestNamedTypesAndConcreteContainers(t *testing.T) {
 	}{
 		{"named map", namedMap{"b": 1, "a": "x"}, `{"a":"x","b":1}`},
 		{"named slice", namedSlice{1, "a", true, nil}, `[1,"a",true,null]`},
-		{"named string", namedString("é"), `"` + esc(0x00e9) + `"`},
+		{"named string", namedString("é"), "\"\\u00e9\""},
 		{"named int", namedInt(-7), `-7`},
 		{"map of string", map[string]string{"b": "2", "a": "1"}, `{"a":"1","b":"2"}`},
 		{"map of int", map[string]int{"b": 2, "a": 1}, `{"a":1,"b":2}`},
@@ -434,14 +429,14 @@ func TestLoneSurrogatesRejected(t *testing.T) {
 		name string
 		in   string
 	}{
-		{"high alone", q(esc(0xd834))},
-		{"low alone", q(esc(0xdd1e))},
-		{"high then non-surrogate", q(esc(0xd834) + "A")},
-		{"reversed pair", q(esc(0xdd1e) + esc(0xd834))},
-		{"high then plain escape", q(esc(0xd834) + bs + `n`)},
-		{"in object value", `{"k":` + q(esc(0xd800)) + `}`},
-		{"in object key", `{` + q(esc(0xd800)) + `:"v"}`},
-		{"in array", `["ok",` + q(esc(0xdfff)) + `]`},
+		{"high alone", q("\\ud834")},
+		{"low alone", q("\\udd1e")},
+		{"high then non-surrogate", q("\\ud834A")},
+		{"reversed pair", q("\\udd1e\\ud834")},
+		{"high then plain escape", q(`\ud834\n`)},
+		{"in object value", `{"k":` + q("\\ud800") + `}`},
+		{"in object key", `{` + q("\\ud800") + `:"v"}`},
+		{"in array", `["ok",` + q("\\udfff") + `]`},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -452,7 +447,7 @@ func TestLoneSurrogatesRejected(t *testing.T) {
 	}
 
 	// A well-formed pair is accepted and round-trips to the same escape text.
-	good := q(esc(0xd834) + esc(0xdd1e))
+	good := q("\\ud834\\udd1e")
 	v, err := canonical.Decode([]byte(good))
 	if err != nil {
 		t.Fatalf("Decode(%s): %v", good, err)
@@ -470,7 +465,7 @@ func TestLoneSurrogatesRejected(t *testing.T) {
 
 	// An escaped backslash immediately before surrogate-looking text is data,
 	// not an escape introducer, and must be accepted.
-	escapedBackslash := q(bs + bs + `ud834`)
+	escapedBackslash := q(`\\ud834`)
 	if _, err := canonical.Decode([]byte(escapedBackslash)); err != nil {
 		t.Errorf("Decode(%s) = %v, want nil", escapedBackslash, err)
 	}
