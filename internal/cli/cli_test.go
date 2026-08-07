@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -258,5 +259,78 @@ func TestUsageBasics(t *testing.T) {
 	}
 	if got := r.mustRun("version"); !strings.Contains(got.stdout, cli.Version) {
 		t.Errorf("version = %q", got.stdout)
+	}
+}
+
+// Peer harnesses must not both pick up the same packet.
+func TestClaimIsExclusive(t *testing.T) {
+	r := newRunner(t)
+	r.mustRun("init", "p1")
+
+	r.mustRun("claim", "p1", "-owner", "harness-1")
+
+	taken := r.run("claim", "p1", "-owner", "harness-2")
+	if taken.code != cli.ExitHeld {
+		t.Fatalf("exit = %d, want %d", taken.code, cli.ExitHeld)
+	}
+	if !strings.Contains(taken.stderr, "harness-1") {
+		t.Errorf("stderr = %q, want it to name the holder", taken.stderr)
+	}
+
+	// Re-claiming your own is the heartbeat, not a conflict.
+	r.mustRun("claim", "p1", "-owner", "harness-1")
+
+	// Only the holder may release.
+	if got := r.run("release", "p1", "-owner", "harness-2"); got.code != cli.ExitHeld {
+		t.Errorf("release by a non-holder: exit = %d, want %d", got.code, cli.ExitHeld)
+	}
+	r.mustRun("release", "p1", "-owner", "harness-1")
+	r.mustRun("claim", "p1", "-owner", "harness-2")
+}
+
+// `wfc next` is a work queue pop: concurrent pullers never get the same packet.
+func TestNextHandsOutEachPacketOnce(t *testing.T) {
+	r := newRunner(t)
+	const packets = 5
+	for i := 0; i < packets; i++ {
+		r.mustRun("init", "pkt"+strconv.Itoa(i))
+	}
+
+	const pullers = 12
+	type pull struct {
+		code   int
+		packet string
+	}
+	results := make(chan pull, pullers)
+	start := make(chan struct{})
+	for i := 0; i < pullers; i++ {
+		go func(i int) {
+			<-start
+			got := r.run("next", "-owner", "h"+strconv.Itoa(i))
+			results <- pull{code: got.code, packet: strings.SplitN(got.stdout, "\n", 2)[0]}
+		}(i)
+	}
+	close(start)
+
+	seen := map[string]bool{}
+	handed := 0
+	for i := 0; i < pullers; i++ {
+		got := <-results
+		if got.code != cli.ExitOK {
+			continue
+		}
+		handed++
+		if seen[got.packet] {
+			t.Errorf("packet %s was handed out twice", got.packet)
+		}
+		seen[got.packet] = true
+	}
+	if handed != packets {
+		t.Errorf("handed out %d packets, want %d", handed, packets)
+	}
+
+	// Nothing left to pick up.
+	if got := r.run("next", "-owner", "late"); got.code == cli.ExitOK {
+		t.Error("next handed out a packet when everything was claimed")
 	}
 }

@@ -154,10 +154,13 @@ func migrate(ctx context.Context, sqldb *sql.DB, migrations []Migration) ([]int,
 		if appliedSet[m.Version] {
 			continue
 		}
-		if err := applyMigration(ctx, sqldb, m); err != nil {
+		did, err := applyMigration(ctx, sqldb, m)
+		if err != nil {
 			return ran, err
 		}
-		ran = append(ran, m.Version)
+		if did {
+			ran = append(ran, m.Version)
+		}
 	}
 	return ran, nil
 }
@@ -183,24 +186,42 @@ func appliedVersions(ctx context.Context, sqldb *sql.DB) ([]int, error) {
 	return versions, nil
 }
 
-func applyMigration(ctx context.Context, sqldb *sql.DB, m Migration) error {
+// applyMigration applies one migration, reporting whether it did the work.
+//
+// The "is it applied?" check happens inside the transaction, not before it.
+// Several wfc processes routinely start at once — one harness handing a task
+// to another — and a check outside the write lock lets two of them both decide
+// to create the same table. Because connections open with _txlock=immediate,
+// BEGIN takes the write lock, so re-reading here makes check-and-apply atomic
+// across processes: the second one sees the row and does nothing.
+func applyMigration(ctx context.Context, sqldb *sql.DB, m Migration) (bool, error) {
 	tx, err := sqldb.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: begin migration %d: %w", m.Version, err)
+		return false, fmt.Errorf("store: begin migration %d: %w", m.Version, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var already int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", m.Version,
+	).Scan(&already); err != nil {
+		return false, fmt.Errorf("store: check migration %d: %w", m.Version, err)
+	}
+	if already > 0 {
+		return false, nil
+	}
+
 	if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
-		return fmt.Errorf("store: apply migration %s: %w", m.File, err)
+		return false, fmt.Errorf("store: apply migration %s: %w", m.File, err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
 		m.Version, time.Now().UTC().Format(time.RFC3339Nano),
 	); err != nil {
-		return fmt.Errorf("store: record migration %d: %w", m.Version, err)
+		return false, fmt.Errorf("store: record migration %d: %w", m.Version, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit migration %d: %w", m.Version, err)
+		return false, fmt.Errorf("store: commit migration %d: %w", m.Version, err)
 	}
-	return nil
+	return true, nil
 }

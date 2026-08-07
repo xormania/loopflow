@@ -12,6 +12,14 @@ type Artifact struct {
 	CreatedAt string
 }
 
+type Claim struct {
+	PacketID   string
+	Owner      string
+	Note       string
+	AcquiredAt string
+	ExpiresAt  string
+}
+
 type Event struct {
 	PacketID    string
 	Seq         int64

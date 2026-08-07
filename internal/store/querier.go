@@ -11,10 +11,12 @@ import (
 type Querier interface {
 	CountEvents(ctx context.Context, packetID string) (int64, error)
 	CreatePacket(ctx context.Context, arg CreatePacketParams) error
+	DeleteClaim(ctx context.Context, packetID string) error
 	GetArtifact(ctx context.Context, digest string) (Artifact, error)
 	// Chain tail. Returns sql.ErrNoRows for a packet with no events, which the
 	// caller reads as "expect seq 1 with a zero prev".
 	GetChainTail(ctx context.Context, packetID string) (Event, error)
+	GetClaim(ctx context.Context, packetID string) (Claim, error)
 	GetEvent(ctx context.Context, arg GetEventParams) (Event, error)
 	GetPacket(ctx context.Context, packetID string) (Packet, error)
 	GetPacketState(ctx context.Context, packetID string) (PacketState, error)
@@ -23,8 +25,14 @@ type Querier interface {
 	InsertArtifact(ctx context.Context, arg InsertArtifactParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	ListArtifacts(ctx context.Context) ([]Artifact, error)
+	ListClaims(ctx context.Context) ([]Claim, error)
 	ListEvents(ctx context.Context, packetID string) ([]Event, error)
 	ListPackets(ctx context.Context) ([]Packet, error)
+	// Packets nobody currently holds: never claimed, or claimed by a harness whose
+	// lease has run out. Times are stored fixed-width so this string comparison is
+	// a chronological one.
+	ListUnclaimedPackets(ctx context.Context, expiresAt string) ([]string, error)
+	PutClaim(ctx context.Context, arg PutClaimParams) error
 	// The projected current state is replaced wholesale in the same transaction
 	// that appends the event producing it. Events are never updated; this row is
 	// a derived view and carries the seq and hash it was derived from so a

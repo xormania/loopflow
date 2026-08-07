@@ -286,3 +286,54 @@ func TestTxCommits(t *testing.T) {
 		t.Errorf("packet missing after commit: %v", err)
 	}
 }
+
+// Several wfc processes routinely start at once, and on a fresh database they
+// all try to migrate. Before the check moved inside the write lock, they raced:
+// two would read "nothing applied" and both try to create the same table.
+func TestConcurrentMigrateIsSafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "control.sqlite")
+
+	const racers = 8
+	errs := make(chan error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		go func() {
+			<-start
+			db, err := Open(t.Context(), path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer func() { _ = db.Close() }()
+			_, err = db.Migrate(t.Context())
+			errs <- err
+		}()
+	}
+	close(start)
+
+	for i := 0; i < racers; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("racer %d: %v", i, err)
+		}
+	}
+
+	db, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Each migration ran exactly once.
+	embedded, err := LoadMigrations()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var applied int
+	if err := db.SQL().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM schema_migrations").Scan(&applied); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if applied != len(embedded) {
+		t.Errorf("schema_migrations has %d rows, want %d", applied, len(embedded))
+	}
+}

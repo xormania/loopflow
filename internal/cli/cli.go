@@ -19,6 +19,7 @@ import (
 
 	"github.com/xormania/wfc/internal/artifacts"
 	"github.com/xormania/wfc/internal/canonical"
+	"github.com/xormania/wfc/internal/claims"
 	"github.com/xormania/wfc/internal/events"
 	"github.com/xormania/wfc/internal/stateroot"
 	"github.com/xormania/wfc/internal/store"
@@ -34,6 +35,7 @@ const (
 	ExitOK        = 0
 	ExitFailed    = 1
 	ExitIntegrity = 2
+	ExitHeld      = 3
 	ExitUsage     = 64
 )
 
@@ -65,14 +67,31 @@ Commands:
   get <digest> [-o FILE]
         Write stored content out, after verifying it still hashes correctly.
 
+  claim <packet> -owner ID [-ttl 15m] [-note TEXT]
+        Take the claim on a packet. Exit 3 if another owner holds it.
+        Claiming one you already hold extends it — that is the heartbeat.
+
+  release <packet> -owner ID
+        Drop your claim.
+
+  next -owner ID [-ttl 15m] [-note TEXT]
+        Claim the oldest unclaimed packet and print its id. Exit 1 if there
+        is nothing to pick up.
+
   version
 
 Flags (accepted before or after the command):
-  -root DIR   state root (default $XDG_STATE_HOME/wfc, else ~/.local/state/wfc)
+  -root DIR   state root; also $WFC_ROOT
+              (default $XDG_STATE_HOME/wfc, else ~/.local/state/wfc)
   -json       machine-readable output
 
+Concurrency:
+  Many wfc processes may share one state root. Writes are serialised by
+  SQLite; appends read the chain tail and write inside the same lock, so
+  concurrent recorders queue rather than fork the chain.
+
 Exit codes:
-  0 ok    1 refused or failed    2 evidence-integrity    64 usage
+  0 ok   1 refused or failed   2 evidence-integrity   3 claim held   64 usage
 `
 
 // Run executes one command line and returns the process exit code.
@@ -120,13 +139,16 @@ func init() {
 	// Declared in init to avoid an initialisation cycle: each command closes
 	// over env, which references this map through Run.
 	commands = map[string]commandFunc{
-		"init":   cmdInit,
-		"status": cmdStatus,
-		"record": cmdRecord,
-		"log":    cmdLog,
-		"verify": cmdVerify,
-		"put":    cmdPut,
-		"get":    cmdGet,
+		"init":    cmdInit,
+		"status":  cmdStatus,
+		"record":  cmdRecord,
+		"log":     cmdLog,
+		"verify":  cmdVerify,
+		"put":     cmdPut,
+		"get":     cmdGet,
+		"claim":   cmdClaim,
+		"release": cmdRelease,
+		"next":    cmdNext,
 	}
 }
 
@@ -141,6 +163,7 @@ type env struct {
 	db     *store.DB
 	log    *events.Log
 	art    *artifacts.Store
+	claims *claims.Store
 }
 
 // flags returns a FlagSet that also accepts the global flags, so that both
@@ -156,14 +179,22 @@ func (e *env) flags(name string) *flag.FlagSet {
 // open resolves the state root, opens the database, and migrates it. Every
 // command starts here; there is no separate setup step to forget.
 func (e *env) open(ctx context.Context) error {
+	// -root wins, then WFC_ROOT, then the default. The environment variable is
+	// what lets a harness point every tool it hands off to at one shared
+	// store without threading a flag through every call site.
+	root := e.root
+	if root == "" {
+		root = os.Getenv("WFC_ROOT")
+	}
+
 	var (
 		layout stateroot.Layout
 		err    error
 	)
-	if e.root == "" {
+	if root == "" {
 		layout, err = stateroot.Default()
 	} else {
-		layout, err = stateroot.New(e.root)
+		layout, err = stateroot.New(root)
 	}
 	if err != nil {
 		return err
@@ -190,6 +221,7 @@ func (e *env) open(ctx context.Context) error {
 		return err
 	}
 	e.art = art
+	e.claims = claims.New(db)
 	return nil
 }
 
@@ -208,7 +240,13 @@ func (e *env) fail(err error) int {
 	var eventIntegrity *events.IntegrityError
 	var artifactIntegrity *artifacts.IntegrityError
 	var refusal *events.RefusalError
+	var held *claims.HeldError
 	switch {
+	case errors.As(err, &held):
+		code, classification = ExitHeld, "claim-held"
+		payload["packet"] = held.Packet
+		payload["owner"] = held.Owner
+		payload["expires"] = held.Expires
 	case errors.As(err, &eventIntegrity):
 		code, classification = ExitIntegrity, eventIntegrity.Classification()
 		if eventIntegrity.Seq > 0 {
@@ -724,4 +762,113 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// ------------------------------------------------------------------ claims --
+
+func cmdClaim(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("claim")
+	owner := fs.String("owner", "", "who is taking this packet (required)")
+	note := fs.String("note", "", "what you are doing with it")
+	ttl := fs.Duration("ttl", claims.DefaultTTL, "how long the claim lasts")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("claim takes exactly one packet id"))
+	}
+	if *owner == "" {
+		return e.usage(errors.New("claim requires -owner"))
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	claim, err := e.claims.Acquire(ctx, pos[0], *owner, *note, *ttl)
+	if err != nil {
+		return e.fail(err)
+	}
+	e.reportClaim(claim, "claimed")
+	return ExitOK
+}
+
+func cmdRelease(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("release")
+	owner := fs.String("owner", "", "who is releasing it (required)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 1 {
+		return e.usage(errors.New("release takes exactly one packet id"))
+	}
+	if *owner == "" {
+		return e.usage(errors.New("release requires -owner"))
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	if err := e.claims.Release(ctx, pos[0], *owner); err != nil {
+		return e.fail(err)
+	}
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{"ok": true, "packet": pos[0], "released": true})
+	} else {
+		fmt.Fprintf(e.out, "released %s\n", pos[0])
+	}
+	return ExitOK
+}
+
+func cmdNext(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("next")
+	owner := fs.String("owner", "", "who is picking work up (required)")
+	note := fs.String("note", "", "what you are doing with it")
+	ttl := fs.Duration("ttl", claims.DefaultTTL, "how long the claim lasts")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 0 {
+		return e.usage(errors.New("next takes no positional arguments"))
+	}
+	if *owner == "" {
+		return e.usage(errors.New("next requires -owner"))
+	}
+
+	if err := e.open(ctx); err != nil {
+		return e.fail(err)
+	}
+	defer e.close()
+
+	claim, found, err := e.claims.Next(ctx, *owner, *note, *ttl)
+	if err != nil {
+		return e.fail(err)
+	}
+	if !found {
+		if e.jsonOut {
+			e.writeJSON(e.out, map[string]any{"ok": false, "available": false})
+		} else {
+			fmt.Fprintln(e.errOut, "wfc: nothing available to pick up")
+		}
+		return ExitFailed
+	}
+	e.reportClaim(claim, "claimed")
+	return ExitOK
+}
+
+func (e *env) reportClaim(c claims.Claim, verb string) {
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{"ok": true, "claim": c})
+		return
+	}
+	// The bare packet id first, so `PACKET=$(wfc next -owner me | head -1)`
+	// works without any parsing.
+	fmt.Fprintln(e.out, c.Packet)
+	fmt.Fprintf(e.out, "%s by %s until %s\n", verb, c.Owner, c.Expires.Format("2006-01-02T15:04:05Z"))
 }
