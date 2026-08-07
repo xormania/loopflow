@@ -1,0 +1,60 @@
+# --- Handoff package: never committed (AGENTS.md) --------------------------
+# proj/ is the untracked specs/decisions/plans package. Root-anchored so a
+# nested test fixture named proj/ is not silently swallowed.
+/proj/
+
+# --- Go ---------------------------------------------------------------------
+# Compiled objects and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries built with `go test -c`
+*.test
+
+# Coverage output. Deliberately NOT the conventional blanket `*.out`: this
+# repo keeps golden fixtures under testdata/ and a silently ignored fixture is
+# exactly the evidence-integrity failure mode the product exists to prevent.
+/coverage.out
+*.cover.out
+
+# Dependency vendoring and workspaces
+/vendor/
+go.work
+go.work.sum
+
+# Locally built binaries
+/bin/
+/flowd
+/wfc
+
+# --- Runtime names (environment-facts.md 4b) --------------------------------
+# Root-anchored on purpose. The source list is unanchored, but unanchored
+# `state/` or `cache/` would silently ignore a future internal/state or
+# internal/cache package. These are runtime directories at the repo root.
+/data/
+/volumes/
+/runtime/
+/logs/
+/state/
+/cache/
+/.cache/
+/agent-state/
+/.tmp/
+/tmp/
+
+# Database and log files anywhere: the daemon's state root lives outside the
+# repo (~/.local/state/wfc/, decisions.md D12), but tests may create these.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# --- Editor / environment ---------------------------------------------------
+.env
+.DS_Store
