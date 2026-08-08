@@ -471,12 +471,12 @@ func TestRunSeparatesRefusalFromAcceptedFailure(t *testing.T) {
 		t.Errorf("classified as %q, want failure-recorded", got.stderr)
 	}
 	if strings.Contains(got.stderr, "accepted") {
-		t.Error("the recorder used Flow's word for a decision it does not own")
+		t.Error("the recorder used the wrapped tool's word for a decision it does not own")
 	}
 }
 
 // An optional recorder must never become a precondition for the command it
-// wraps. A broken state root must not stop Flow from running.
+// wraps. A broken state root must not stop the wrapped command from running.
 func TestRunStillRunsWhenTheRecorderCannotWork(t *testing.T) {
 	dir := writePacket(t, "tests-frozen", 1, "head-1")
 

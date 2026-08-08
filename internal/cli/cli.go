@@ -45,7 +45,7 @@ const (
 	ExitUsage     = 64
 )
 
-const usageText = `loopflow — workflow control plane
+const usageText = `loopflow — workflow coordination for agent harnesses
 
 Usage:
   loopflow [flags] <command> [args]
@@ -90,7 +90,7 @@ Commands:
         same session id is the heartbeat.
 
   run <packet-dir> -- <command…>
-        Run a Flow command and record the attempt: argv, exit, marker,
+        Run a workflow command and record the attempt: argv, exit, marker,
         output, and the packet's event count, head, and stage before and
         after. Output and exit code pass straight through, so this can sit
         in front of an existing invocation unchanged. A refusal leaves no
@@ -103,7 +103,7 @@ Commands:
         Which sessions are running, stale, or terminal, and the id to resume.
 
   check <packet-dir>
-        Verify a native Flow packet's workflow-events.jsonl in place:
+        Verify a packet directory's workflow-events.jsonl in place:
         recompute every hash and link. Reads only; nothing is stored.
 
   version
@@ -881,7 +881,7 @@ func (e *env) reportClaim(c claims.Claim, verb string) {
 
 // ------------------------------------------------------------------ check ---
 
-// cmdCheck verifies a native Flow packet where it lies. It stores nothing:
+// cmdCheck verifies a packet directory where it lies. It stores nothing:
 // flow-workflow.py owns that packet's state and acceptance, and loopflow reading it
 // must not turn into loopflow claiming it.
 func cmdCheck(ctx context.Context, e *env, args []string) int {
@@ -949,7 +949,7 @@ func cmdSession(ctx context.Context, e *env, args []string) int {
 	fs := e.flags("session")
 	role := fs.String("role", "", "custody role the session is filling (required)")
 	task := fs.String("task", "", "role-task kind, e.g. gap-review, sensitivity-review, final-audit")
-	cycle := fs.Int64("cycle", 0, "your correction cycle for this role-task (not Flow's event cycle)")
+	cycle := fs.Int64("cycle", 0, "your correction cycle for this role-task (not the packet's event cycle)")
 	client := fs.String("client", "", "codex, grok, claude, …")
 	sessionID := fs.String("session-id", "", "provider session id")
 	agentPath := fs.String("agent-path", "", "collaboration task path, for internal subagents")
@@ -1066,7 +1066,7 @@ func describeSession(s sessions.Session) string {
 
 // ------------------------------------------------------------------- run ----
 
-// cmdRun executes a Flow command against a packet and records the attempt.
+// cmdRun executes a workflow command against a packet and records the attempt.
 //
 // The recorder is optional and must never become a precondition for the native
 // command. Everything loopflow does here is best-effort and happens around the
@@ -1295,7 +1295,7 @@ func (e *env) exitFor(err error) int {
 	return ExitFailed
 }
 
-const exhaustivenessNote = "Flow validates fail-fast: a refusal names the first unmet " +
+const exhaustivenessNote = "The wrapped tool validates fail-fast: a refusal names the first unmet " +
 	"precondition, not every one. This is not a complete account of what blocks the packet."
 
 // failedEvent is a durable failure recorded in the packet's chain.
@@ -1401,7 +1401,7 @@ func jsonInt(v any) (int64, bool) {
 }
 
 // hashToolInArgv digests the script being invoked, so an attempt records which
-// version of Flow judged it.
+// version of the tool judged it.
 func hashToolInArgv(argv []string) string {
 	for _, arg := range argv {
 		if !strings.HasSuffix(arg, ".py") {
