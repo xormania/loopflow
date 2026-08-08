@@ -1,4 +1,4 @@
-module github.com/xormania/wfc
+module github.com/xormania/loopflow
 
 go 1.26
 

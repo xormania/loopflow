@@ -189,7 +189,7 @@ func appliedVersions(ctx context.Context, sqldb *sql.DB) ([]int, error) {
 // applyMigration applies one migration, reporting whether it did the work.
 //
 // The "is it applied?" check happens inside the transaction, not before it.
-// Several wfc processes routinely start at once — one harness handing a task
+// Several loopflow processes routinely start at once — one harness handing a task
 // to another — and a check outside the write lock lets two of them both decide
 // to create the same table. Because connections open with _txlock=immediate,
 // BEGIN takes the write lock, so re-reading here makes check-and-apply atomic

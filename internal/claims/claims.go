@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // DefaultTTL is how long a claim lasts when the caller does not say.

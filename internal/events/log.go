@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // ErrNotAChain reports that a file is not a hash-linked event chain at all.

@@ -28,7 +28,7 @@ go.work.sum
 # Locally built binaries
 /bin/
 /flowd
-/wfc
+/loopflow
 
 # --- Runtime names (environment-facts.md 4b) --------------------------------
 # Root-anchored on purpose. The source list is unanchored, but unanchored
@@ -46,7 +46,7 @@ go.work.sum
 /tmp/
 
 # Database and log files anywhere: the daemon's state root lives outside the
-# repo (~/.local/state/wfc/, decisions.md D12), but tests may create these.
+# repo (~/.local/state/loopflow/, decisions.md D12), but tests may create these.
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

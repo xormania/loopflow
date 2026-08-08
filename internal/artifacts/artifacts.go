@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // Classification values. The full taxonomy per spec 03 arrives with the

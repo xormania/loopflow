@@ -1,7 +1,7 @@
-// Package stateroot resolves where wfc keeps its data.
+// Package stateroot resolves where loopflow keeps its data.
 //
-// Everything lives under $XDG_STATE_HOME/wfc, defaulting to
-// ~/.local/state/wfc (decisions.md D12): the SQLite database and the
+// Everything lives under $XDG_STATE_HOME/loopflow, defaulting to
+// ~/.local/state/loopflow (decisions.md D12): the SQLite database and the
 // content-addressed artifact store. Directories are created 0700 — the
 // artifact store holds evidence, and filesystem permissions are the only thing
 // protecting it.
@@ -26,16 +26,16 @@ type Layout struct {
 	Artifacts string
 }
 
-// DefaultRoot is $XDG_STATE_HOME/wfc, or ~/.local/state/wfc when that is unset.
+// DefaultRoot is $XDG_STATE_HOME/loopflow, or ~/.local/state/loopflow when that is unset.
 func DefaultRoot() (string, error) {
 	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
-		return filepath.Join(base, "wfc"), nil
+		return filepath.Join(base, "loopflow"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("stateroot: no XDG_STATE_HOME and no home directory: %w", err)
 	}
-	return filepath.Join(home, ".local", "state", "wfc"), nil
+	return filepath.Join(home, ".local", "state", "loopflow"), nil
 }
 
 // New resolves the layout for a state root without creating anything.
@@ -58,14 +58,14 @@ func New(root string) (Layout, error) {
 //
 // A tool that writes inside a checkout can invalidate packet manifest custody
 // — a stray write to .claude/settings.local.json once cost an otherwise
-// successful RED. "wfc writes nothing into repositories" was previously true
-// only of the default configuration; -root and WFC_ROOT could still be pointed
+// successful RED. "loopflow writes nothing into repositories" was previously true
+// only of the default configuration; -root and LOOPFLOW_ROOT could still be pointed
 // at one. This makes it an enforced property instead of a habit.
 func refuseInsideRepository(root string) error {
 	for dir := root; ; {
 		if isRepository(dir) {
 			return fmt.Errorf("stateroot: %s is inside the Git work tree at %s; "+
-				"wfc must not write into a checkout, because that can invalidate "+
+				"loopflow must not write into a checkout, because that can invalidate "+
 				"packet manifest custody", root, dir)
 		}
 		parent := filepath.Dir(dir)

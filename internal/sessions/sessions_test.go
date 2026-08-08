@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 func newTestStore(t *testing.T, now func() time.Time) *Store {
@@ -23,7 +23,7 @@ func newTestStore(t *testing.T, now func() time.Time) *Store {
 	return NewWithClock(db, now)
 }
 
-// A session nobody has heard from goes stale, never dead: wfc did not observe
+// A session nobody has heard from goes stale, never dead: loopflow did not observe
 // it terminate, and saying more than it knows is how you end up with two live
 // workers.
 func TestSessionGoesStaleButNotDead(t *testing.T) {
@@ -53,7 +53,7 @@ func TestSessionGoesStaleButNotDead(t *testing.T) {
 		t.Errorf("status = %q; stale is a judgement about silence, not an observed exit", after.Status)
 	}
 
-	// A stale session still blocks a replacement. wfc never watched the old
+	// A stale session still blocks a replacement. loopflow never watched the old
 	// worker stop, so it cannot license launching another one.
 	_, err = s.Record(t.Context(), Session{
 		Packet: "p1", Role: "auditor", Cycle: 3, Client: "grok", SessionID: "sess-2",

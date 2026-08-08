@@ -1,4 +1,4 @@
-// Command wfc is the workflow control-plane command line.
+// Command loopflow is the workflow control-plane command line.
 //
 // It opens the SQLite state directly — there is no server to start first.
 package main
@@ -7,7 +7,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/xormania/wfc/internal/cli"
+	"github.com/xormania/loopflow/internal/cli"
 )
 
 func main() {

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xormania/wfc/internal/cli"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/cli"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // runner drives the CLI against one state root, exactly as a shell would.
@@ -42,7 +42,7 @@ func (r *runner) mustRun(args ...string) result {
 	r.t.Helper()
 	got := r.run(args...)
 	if got.code != cli.ExitOK {
-		r.t.Fatalf("wfc %s: exit %d\n%s%s", strings.Join(args, " "), got.code, got.stdout, got.stderr)
+		r.t.Fatalf("loopflow %s: exit %d\n%s%s", strings.Join(args, " "), got.code, got.stdout, got.stderr)
 	}
 	return got
 }
@@ -52,7 +52,7 @@ func (r *runner) json(args ...string) map[string]any {
 	out := r.mustRun(append(args, "-json")...)
 	var v map[string]any
 	if err := json.Unmarshal([]byte(out.stdout), &v); err != nil {
-		r.t.Fatalf("wfc %s: not JSON: %v\n%s", strings.Join(args, " "), err, out.stdout)
+		r.t.Fatalf("loopflow %s: not JSON: %v\n%s", strings.Join(args, " "), err, out.stdout)
 	}
 	return v
 }
@@ -99,7 +99,7 @@ func TestInitRecordStatusVerify(t *testing.T) {
 		t.Error("log is not compact canonical JSON")
 	}
 
-	// `wfc status` with no packet lists what exists.
+	// `loopflow status` with no packet lists what exists.
 	if out := r.mustRun("status").stdout; !strings.Contains(out, "p1") {
 		t.Errorf("status listing = %q", out)
 	}
@@ -187,10 +187,10 @@ func TestTamperedChainBlocks(t *testing.T) {
 	for _, args := range [][]string{{"status"}, {"status", "p1"}, {"verify", "p1"}} {
 		got := r.run(args...)
 		if got.code != cli.ExitIntegrity {
-			t.Errorf("wfc %s: exit = %d, want %d", strings.Join(args, " "), got.code, cli.ExitIntegrity)
+			t.Errorf("loopflow %s: exit = %d, want %d", strings.Join(args, " "), got.code, cli.ExitIntegrity)
 		}
 		if strings.Contains(got.stdout, `"verified": true`) {
-			t.Errorf("wfc %s reported tampered evidence as verified", strings.Join(args, " "))
+			t.Errorf("loopflow %s reported tampered evidence as verified", strings.Join(args, " "))
 		}
 	}
 }
@@ -288,8 +288,8 @@ func TestClaimIsExclusive(t *testing.T) {
 	r.mustRun("claim", "p1", "-owner", "harness-2")
 }
 
-// `wfc check` verifies a native packet where it lies, storing nothing.
-// flow-workflow.py owns those packets; wfc reading one must not become wfc
+// `loopflow check` verifies a native packet where it lies, storing nothing.
+// flow-workflow.py owns those packets; loopflow reading one must not become loopflow
 // claiming it.
 func TestCheckVerifiesANativePacketInPlace(t *testing.T) {
 	r := newRunner(t)
@@ -297,7 +297,7 @@ func TestCheckVerifiesANativePacketInPlace(t *testing.T) {
 	r.mustRun("record", "p1", "red", "-outcome", "failed")
 	r.mustRun("record", "p1", "test-freeze", "-outcome", "passed")
 
-	// wfc's own output is the native format, so it round-trips through a file.
+	// loopflow's own output is the native format, so it round-trips through a file.
 	dir := filepath.Join(t.TempDir(), "packet")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -386,7 +386,7 @@ func TestSessionGuardsAgainstADuplicateLaunch(t *testing.T) {
 }
 
 // -takeover is for when the caller has proven the old process dead by means
-// wfc cannot see.
+// loopflow cannot see.
 func TestSessionTakeover(t *testing.T) {
 	r := newRunner(t)
 	r.mustRun("session", "p1", "-role", "auditor", "-client", "grok", "-session-id", "old")
@@ -492,7 +492,7 @@ func TestRunStillRunsWhenTheRecorderCannotWork(t *testing.T) {
 		t.Errorf("the child did not run: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "not recorded") {
-		t.Errorf("wfc did not say it failed to record: %q", stderr.String())
+		t.Errorf("loopflow did not say it failed to record: %q", stderr.String())
 	}
 }
 
@@ -524,7 +524,7 @@ func TestAttemptsIndexesRecordedFailedEvents(t *testing.T) {
 	r := newRunner(t)
 	dir := writePacket(t, "tests-frozen", 2, "head-2")
 
-	// Build a real, hash-linked chain with wfc itself, then plant it.
+	// Build a real, hash-linked chain with loopflow itself, then plant it.
 	r.mustRun("init", "src")
 	r.mustRun("record", "src", "test-gap-review", "-outcome", "failed",
 		"-issue-key", "product-negative-seam-parity", "-set", "report=results/grok/gap-cycle-0.md")

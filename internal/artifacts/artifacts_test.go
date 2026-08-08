@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 func newTestStore(t *testing.T) *Store {

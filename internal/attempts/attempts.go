@@ -27,8 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // Kinds an attempt can have. Anything that conflates these makes the record

@@ -13,8 +13,8 @@ func TestDefaultRootFollowsXDG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRoot: %v", err)
 	}
-	if got != "/somewhere/state/wfc" {
-		t.Errorf("DefaultRoot = %q, want /somewhere/state/wfc", got)
+	if got != "/somewhere/state/loopflow" {
+		t.Errorf("DefaultRoot = %q, want /somewhere/state/loopflow", got)
 	}
 
 	t.Setenv("XDG_STATE_HOME", "")
@@ -22,13 +22,13 @@ func TestDefaultRootFollowsXDG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultRoot: %v", err)
 	}
-	if !strings.HasSuffix(got, filepath.Join(".local", "state", "wfc")) {
-		t.Errorf("DefaultRoot = %q, want a ~/.local/state/wfc path", got)
+	if !strings.HasSuffix(got, filepath.Join(".local", "state", "loopflow")) {
+		t.Errorf("DefaultRoot = %q, want a ~/.local/state/loopflow path", got)
 	}
 }
 
 func TestNewResolvesPathsUnderTheRoot(t *testing.T) {
-	l, err := New("/var/lib/wfc-test")
+	l, err := New("/var/lib/loopflow-test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

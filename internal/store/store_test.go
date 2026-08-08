@@ -287,7 +287,7 @@ func TestTxCommits(t *testing.T) {
 	}
 }
 
-// Several wfc processes routinely start at once, and on a fresh database they
+// Several loopflow processes routinely start at once, and on a fresh database they
 // all try to migrate. Before the check moved inside the write lock, they raced:
 // two would read "nothing applied" and both try to create the same table.
 func TestConcurrentMigrateIsSafe(t *testing.T) {

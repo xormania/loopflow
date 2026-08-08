@@ -1,6 +1,6 @@
-# AGENTS.md — wfc repo operating rules
+# AGENTS.md — loopflow repo operating rules
 
-You are developing `wfc`: a small Go CLI that tracks workflow packets as an
+You are developing `loopflow`: a small Go CLI that tracks workflow packets as an
 append-only, hash-verified event chain in SQLite, plus a content-addressed
 artifact store.
 

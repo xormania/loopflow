@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xormania/wfc/internal/canonical"
+	"github.com/xormania/loopflow/internal/canonical"
 )
 
 // Expected values below are written with doubled backslashes in interpreted

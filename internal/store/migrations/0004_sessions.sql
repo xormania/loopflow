@@ -9,11 +9,11 @@
 -- already read. This table is that correlation.
 --
 -- packet_id deliberately has no foreign key. The packets these track are owned
--- by flow-workflow.py and live on disk; requiring `wfc init` first would make
--- wfc claim packets it does not own just to note who is working on one.
+-- by flow-workflow.py and live on disk; requiring `loopflow init` first would make
+-- loopflow claim packets it does not own just to note who is working on one.
 --
 -- last_seen plus ttl_seconds gives the death timeout that does not otherwise
--- exist. A session past its ttl reports as stale, never as dead: wfc did not
+-- exist. A session past its ttl reports as stale, never as dead: loopflow did not
 -- observe it terminate, and saying more than it knows is how a loop ends up
 -- with two live workers.
 

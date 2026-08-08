@@ -1,6 +1,6 @@
-// Package cli implements the wfc command line.
+// Package cli implements the loopflow command line.
 //
-// wfc talks to SQLite directly. There is no daemon: the database is opened,
+// loopflow talks to SQLite directly. There is no daemon: the database is opened,
 // migrated if needed, used, and closed on every invocation. WAL mode plus a
 // busy timeout is enough for short-lived commands, and skipping the
 // client/server split removes a socket, a lock, an HTTP layer, and a wire
@@ -21,14 +21,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xormania/wfc/internal/artifacts"
-	"github.com/xormania/wfc/internal/attempts"
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/claims"
-	"github.com/xormania/wfc/internal/events"
-	"github.com/xormania/wfc/internal/sessions"
-	"github.com/xormania/wfc/internal/stateroot"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/artifacts"
+	"github.com/xormania/loopflow/internal/attempts"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/claims"
+	"github.com/xormania/loopflow/internal/events"
+	"github.com/xormania/loopflow/internal/sessions"
+	"github.com/xormania/loopflow/internal/stateroot"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // Version is the build identity.
@@ -45,10 +45,10 @@ const (
 	ExitUsage     = 64
 )
 
-const usageText = `wfc — workflow control plane
+const usageText = `loopflow — workflow control plane
 
 Usage:
-  wfc [flags] <command> [args]
+  loopflow [flags] <command> [args]
 
 Commands:
   init <packet> [-objective TEXT] [-state FILE]
@@ -85,7 +85,7 @@ Commands:
         [-reason TEXT] [-ttl 30m] [-takeover]
         Record which provider session is on a role-task, keyed by
         packet + role + task + cycle. Exit 3 if a different session already
-        holds it — live or stale. Stale means wfc has not heard from it, not
+        holds it — live or stale. Stale means loopflow has not heard from it, not
         that it stopped, so replacing one needs -takeover. Re-recording the
         same session id is the heartbeat.
 
@@ -109,12 +109,12 @@ Commands:
   version
 
 Flags (accepted before or after the command):
-  -root DIR   state root; also $WFC_ROOT
-              (default $XDG_STATE_HOME/wfc, else ~/.local/state/wfc)
+  -root DIR   state root; also $LOOPFLOW_ROOT
+              (default $XDG_STATE_HOME/loopflow, else ~/.local/state/loopflow)
   -json       machine-readable output
 
 Concurrency:
-  Many wfc processes may share one state root. Writes are serialised by
+  Many loopflow processes may share one state root. Writes are serialised by
   SQLite; appends read the chain tail and write inside the same lock, so
   concurrent recorders queue rather than fork the chain.
 
@@ -126,7 +126,7 @@ Exit codes:
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	e := &env{out: stdout, errOut: stderr}
 
-	global := flag.NewFlagSet("wfc", flag.ContinueOnError)
+	global := flag.NewFlagSet("loopflow", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	global.Usage = func() { fmt.Fprint(stderr, usageText) }
 	global.StringVar(&e.root, "root", "", "state root")
@@ -147,13 +147,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usageText)
 		return ExitOK
 	case "version":
-		fmt.Fprintf(stdout, "wfc %s\n", Version)
+		fmt.Fprintf(stdout, "loopflow %s\n", Version)
 		return ExitOK
 	}
 
 	run, ok := commands[cmd]
 	if !ok {
-		fmt.Fprintf(stderr, "wfc: unknown command %q\n\n%s", cmd, usageText)
+		fmt.Fprintf(stderr, "loopflow: unknown command %q\n\n%s", cmd, usageText)
 		return ExitUsage
 	}
 	return run(ctx, e, cmdArgs)
@@ -201,9 +201,9 @@ type env struct {
 }
 
 // flags returns a FlagSet that also accepts the global flags, so that both
-// `wfc -json status` and `wfc status -json` work.
+// `loopflow -json status` and `loopflow status -json` work.
 func (e *env) flags(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet("wfc "+name, flag.ContinueOnError)
+	fs := flag.NewFlagSet("loopflow "+name, flag.ContinueOnError)
 	fs.SetOutput(e.errOut)
 	fs.StringVar(&e.root, "root", e.root, "state root")
 	fs.BoolVar(&e.jsonOut, "json", e.jsonOut, "machine-readable output")
@@ -213,12 +213,12 @@ func (e *env) flags(name string) *flag.FlagSet {
 // open resolves the state root, opens the database, and migrates it. Every
 // command starts here; there is no separate setup step to forget.
 func (e *env) open(ctx context.Context) error {
-	// -root wins, then WFC_ROOT, then the default. The environment variable is
+	// -root wins, then LOOPFLOW_ROOT, then the default. The environment variable is
 	// what lets a harness point every tool it hands off to at one shared
 	// store without threading a flag through every call site.
 	root := e.root
 	if root == "" {
-		root = os.Getenv("WFC_ROOT")
+		root = os.Getenv("LOOPFLOW_ROOT")
 	}
 
 	var (
@@ -312,13 +312,13 @@ func (e *env) fail(err error) int {
 	} else {
 		// RefusalError.Error already names the precondition and what is
 		// needed, so there is nothing to add here.
-		fmt.Fprintf(e.errOut, "wfc: %s\n", err)
+		fmt.Fprintf(e.errOut, "loopflow: %s\n", err)
 	}
 	return code
 }
 
 func (e *env) usage(err error) int {
-	fmt.Fprintf(e.errOut, "wfc: %s\n", err)
+	fmt.Fprintf(e.errOut, "loopflow: %s\n", err)
 	return ExitUsage
 }
 
@@ -448,7 +448,7 @@ func (e *env) statusAll(ctx context.Context) int {
 	if e.jsonOut {
 		e.writeJSON(e.out, map[string]any{"ok": !blocked, "packets": out})
 	} else if len(out) == 0 {
-		fmt.Fprintf(e.out, "no packets yet — create one with: wfc init <packet>\n")
+		fmt.Fprintf(e.out, "no packets yet — create one with: loopflow init <packet>\n")
 	} else {
 		for _, s := range out {
 			status := fmt.Sprintf("%s/%s", orDash(s.Phase), orDash(s.Outcome))
@@ -741,7 +741,7 @@ func cmdGet(ctx context.Context, e *env, args []string) int {
 
 // parseArgs parses flags that appear before, between, or after positional
 // arguments. Go's flag package stops at the first non-flag word, which would
-// make the natural `wfc init my-packet -objective ...` silently drop the flag.
+// make the natural `loopflow init my-packet -objective ...` silently drop the flag.
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
@@ -873,7 +873,7 @@ func (e *env) reportClaim(c claims.Claim, verb string) {
 		e.writeJSON(e.out, map[string]any{"ok": true, "claim": c})
 		return
 	}
-	// The bare packet id first, so `PACKET=$(wfc next -owner me | head -1)`
+	// The bare packet id first, so `PACKET=$(loopflow next -owner me | head -1)`
 	// works without any parsing.
 	fmt.Fprintln(e.out, c.Packet)
 	fmt.Fprintf(e.out, "%s by %s until %s\n", verb, c.Owner, c.Expires.Format("2006-01-02T15:04:05Z"))
@@ -882,8 +882,8 @@ func (e *env) reportClaim(c claims.Claim, verb string) {
 // ------------------------------------------------------------------ check ---
 
 // cmdCheck verifies a native Flow packet where it lies. It stores nothing:
-// flow-workflow.py owns that packet's state and acceptance, and wfc reading it
-// must not turn into wfc claiming it.
+// flow-workflow.py owns that packet's state and acceptance, and loopflow reading it
+// must not turn into loopflow claiming it.
 func cmdCheck(ctx context.Context, e *env, args []string) int {
 	fs := e.flags("check")
 	pos, err := parseArgs(fs, args)
@@ -1069,10 +1069,10 @@ func describeSession(s sessions.Session) string {
 // cmdRun executes a Flow command against a packet and records the attempt.
 //
 // The recorder is optional and must never become a precondition for the native
-// command. Everything wfc does here is best-effort and happens around the
+// command. Everything loopflow does here is best-effort and happens around the
 // child: if the state root is unusable, or the packet cannot be read, or the
 // attempt cannot be persisted, the command still runs and its exit code and
-// output still pass through untouched. wfc reports its own failure on stderr
+// output still pass through untouched. loopflow reports its own failure on stderr
 // and gets out of the way.
 func cmdRun(ctx context.Context, e *env, args []string) int {
 	sep := -1
@@ -1083,7 +1083,7 @@ func cmdRun(ctx context.Context, e *env, args []string) int {
 		}
 	}
 	if sep < 0 {
-		return e.usage(errors.New("run needs -- before the command, e.g. wfc run <packet-dir> -- python3 …"))
+		return e.usage(errors.New("run needs -- before the command, e.g. loopflow run <packet-dir> -- python3 …"))
 	}
 	own, command := args[:sep], args[sep+1:]
 	if len(command) == 0 {
@@ -1123,7 +1123,7 @@ func cmdRun(ctx context.Context, e *env, args []string) int {
 	default:
 		// The command could not be started. Report it the way a shell would,
 		// and record that it never ran.
-		fmt.Fprintf(e.errOut, "wfc: %v\n", runErr)
+		fmt.Fprintf(e.errOut, "loopflow: %v\n", runErr)
 		exitCode = 127
 		startErr = runErr.Error()
 	}
@@ -1146,7 +1146,7 @@ func cmdRun(ctx context.Context, e *env, args []string) int {
 	}
 
 	if err := e.recordAttempt(ctx, outcome, beforeErr); err != nil {
-		fmt.Fprintf(e.errOut, "wfc: the attempt was not recorded: %v\n", err)
+		fmt.Fprintf(e.errOut, "loopflow: the attempt was not recorded: %v\n", err)
 	}
 	return exitCode
 }
@@ -1169,7 +1169,7 @@ func (e *env) recordAttempt(ctx context.Context, o attempts.Outcome, beforeErr e
 	if e.jsonOut {
 		e.writeJSON(e.errOut, map[string]any{"ok": true, "attempt": attempt})
 	} else {
-		fmt.Fprintf(e.errOut, "wfc: recorded %s %s (%s)\n", attempt.ID, attempt.Kind, attempt.Transition)
+		fmt.Fprintf(e.errOut, "loopflow: recorded %s %s (%s)\n", attempt.ID, attempt.Kind, attempt.Transition)
 	}
 	return nil
 }
@@ -1256,7 +1256,7 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 
 	fmt.Fprintf(e.out, "\nobserved refusals — first failed precondition only, never the full set\n")
 	if len(refusals) == 0 {
-		fmt.Fprintf(e.out, "  none recorded; run Flow through `wfc run` to capture them\n")
+		fmt.Fprintf(e.out, "  none recorded; run Flow through `loopflow run` to capture them\n")
 	}
 	for _, a := range refusals {
 		e.printAttempt(a)

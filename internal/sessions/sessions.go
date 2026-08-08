@@ -7,7 +7,7 @@
 // remembering, and a forgotten answer costs a duplicate launch. Recording the
 // identity against the role-task makes that a lookup.
 //
-// wfc does not launch workers and does not observe them exit (decisions
+// loopflow does not launch workers and does not observe them exit (decisions
 // elsewhere own both). It only knows what it was told and when. So a session
 // past its TTL is reported stale, never dead: claiming a worker is gone when
 // nobody watched it terminate is exactly how a loop ends up with two live ones.
@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 // DefaultTTL is how long a session is assumed live without being seen again.
@@ -37,7 +37,7 @@ const (
 	StatusTerminal = "terminal"
 )
 
-// Liveness values wfc derives.
+// Liveness values loopflow derives.
 const (
 	LiveRunning  = "running"
 	LiveStale    = "stale"
@@ -63,7 +63,7 @@ func (e *LiveError) Error() string {
 	}
 	advice := "resume it rather than launching another"
 	if e.Existing.Liveness == LiveStale {
-		// Stale means wfc has not heard from it, not that it stopped. wfc never
+		// Stale means loopflow has not heard from it, not that it stopped. loopflow never
 		// watches a worker exit, so it cannot license a replacement; only the
 		// caller can, having checked.
 		advice = "it has gone quiet, which is not the same as having stopped — " +
@@ -165,7 +165,7 @@ func NewWithClock(db *store.DB, now func() time.Time) *Store {
 // terminal status are both written.
 //
 // takeover overrides the refusal, for when the caller has proven the old
-// process terminal by some means wfc cannot see.
+// process terminal by some means loopflow cannot see.
 func (s *Store) Record(ctx context.Context, in Session, takeover bool) (Session, error) {
 	if in.Packet == "" || in.Role == "" {
 		return Session{}, errors.New("sessions: a packet and a role are required")
@@ -196,7 +196,7 @@ func (s *Store) Record(ctx context.Context, in Session, takeover bool) (Session,
 				in.Started = existing.Started
 			} else if existing.Liveness != LiveTerminal && !takeover {
 				// Live or stale both refuse. A stale incumbent has only gone
-				// quiet; wfc never observed it stop, so replacing it silently
+				// quiet; loopflow never observed it stop, so replacing it silently
 				// would be exactly the duplicate launch this guards against.
 				return &LiveError{Existing: existing}
 			}

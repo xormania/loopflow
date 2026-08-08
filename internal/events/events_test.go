@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xormania/wfc/internal/canonical"
-	"github.com/xormania/wfc/internal/events"
-	"github.com/xormania/wfc/internal/store"
+	"github.com/xormania/loopflow/internal/canonical"
+	"github.com/xormania/loopflow/internal/events"
+	"github.com/xormania/loopflow/internal/store"
 )
 
 const testPacket = "packet-1"

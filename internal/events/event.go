@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xormania/wfc/internal/canonical"
+	"github.com/xormania/loopflow/internal/canonical"
 )
 
 // Core event field names. Phase-specific fields are not enumerated: they ride
