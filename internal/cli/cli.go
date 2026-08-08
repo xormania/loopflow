@@ -10,29 +10,37 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/xormania/loopflow/internal/api"
 	"github.com/xormania/loopflow/internal/artifacts"
 	"github.com/xormania/loopflow/internal/attempts"
+	"github.com/xormania/loopflow/internal/backend"
 	"github.com/xormania/loopflow/internal/canonical"
 	"github.com/xormania/loopflow/internal/claims"
 	"github.com/xormania/loopflow/internal/events"
+	"github.com/xormania/loopflow/internal/remote"
+	"github.com/xormania/loopflow/internal/server"
 	"github.com/xormania/loopflow/internal/sessions"
 	"github.com/xormania/loopflow/internal/stateroot"
 	"github.com/xormania/loopflow/internal/store"
 )
 
-// Version is the build identity.
-const Version = "0.1.0"
+// Version is the build identity, shared with the wire protocol.
+const Version = api.Version
 
 // Exit codes. 2 is evidence-integrity to match the convention the native
 // tooling already uses (verify-hosted-ci.py, environment-facts.md 3c), so a
@@ -109,6 +117,12 @@ Commands:
   projects
         List the projects this state root knows.
 
+  serve [-listen ADDR] [-token TOKEN]
+        Serve this state root over HTTP, so harnesses in other containers
+        coordinate here. Every request needs the bearer token; one is
+        generated and printed if none is given. Serving is still recording,
+        not deciding.
+
   version
 
 Flags (accepted before or after the command):
@@ -117,6 +131,10 @@ Flags (accepted before or after the command):
   -project NAME
               work in a named project instead of the derived one; also
               $LOOPFLOW_PROJECT
+  -remote URL run every command against a loopflow server instead of a
+              local root; also $LOOPFLOW_REMOTE. $LOOPFLOW_TOKEN
+              authenticates. The project still resolves locally — identity
+              belongs to the work, not the endpoint.
   -json       machine-readable output
 
 Projects:
@@ -146,6 +164,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	global.Usage = func() { fmt.Fprint(stderr, usageText) }
 	global.StringVar(&e.root, "root", "", "state root")
 	global.StringVar(&e.project, "project", "", "project name")
+	global.StringVar(&e.remote, "remote", "", "loopflow server URL")
 	global.BoolVar(&e.jsonOut, "json", false, "machine-readable output")
 
 	if err := global.Parse(args); err != nil {
@@ -198,7 +217,72 @@ func init() {
 		"sessions": cmdSessions,
 		"release":  cmdRelease,
 		"projects": cmdProjects,
+		"serve":    cmdServe,
 	}
+}
+
+// cmdServe exposes a state root over HTTP so harnesses in other containers
+// can coordinate here. Serving is still recording, not deciding: nothing in
+// it assigns work, launches anything, or declares anything ready.
+func cmdServe(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("serve")
+	listen := fs.String("listen", "127.0.0.1:7171", "address to listen on")
+	token := fs.String("token", "", "bearer token (default $LOOPFLOW_TOKEN, else generated)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 0 {
+		return e.usage(errors.New("serve takes no arguments"))
+	}
+
+	root := e.resolveRoot()
+	if root == "" {
+		if root, err = stateroot.DefaultRoot(); err != nil {
+			return e.fail(err)
+		}
+	}
+	tok := *token
+	if tok == "" {
+		tok = os.Getenv("LOOPFLOW_TOKEN")
+	}
+	generated := false
+	if tok == "" {
+		raw := make([]byte, 16)
+		if _, err := rand.Read(raw); err != nil {
+			return e.fail(err)
+		}
+		tok, generated = hex.EncodeToString(raw), true
+	}
+
+	srv, err := server.New(root, tok)
+	if err != nil {
+		return e.fail(err)
+	}
+	defer srv.Close()
+
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return e.fail(err)
+	}
+	fmt.Fprintf(e.errOut, "loopflow: serving %s on http://%s\n", root, ln.Addr())
+	if generated {
+		// The token is printed exactly once, to stderr, at the operator's
+		// terminal. Handing it to workers is the spawner's job.
+		fmt.Fprintf(e.errOut, "loopflow: token %s\n", tok)
+	}
+
+	httpSrv := &http.Server{Handler: srv.Handler()}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+	if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return e.fail(err)
+	}
+	return ExitOK
 }
 
 // cmdProjects lists the projects this state root knows. It reads only the
@@ -213,21 +297,34 @@ func cmdProjects(ctx context.Context, e *env, args []string) int {
 		return e.usage(errors.New("projects takes no arguments"))
 	}
 
-	root := e.resolveRoot()
-	if root == "" {
-		root, err = stateroot.DefaultRoot()
+	var listed []api.ProjectRow
+	if remoteURL := e.resolveRemote(); remoteURL != "" {
+		proj, err := e.resolveProject()
 		if err != nil {
 			return e.fail(err)
 		}
+		b, err := remote.Dial(remoteURL, os.Getenv("LOOPFLOW_TOKEN"), proj)
+		if err != nil {
+			return e.fail(err)
+		}
+		if listed, err = b.Projects(ctx); err != nil {
+			return e.fail(err)
+		}
+	} else {
+		root := e.resolveRoot()
+		if root == "" {
+			if root, err = stateroot.DefaultRoot(); err != nil {
+				return e.fail(err)
+			}
+		}
+		if listed, err = server.ListProjects(root); err != nil {
+			return e.fail(err)
+		}
 	}
+
 	// Best effort: marking the current project helps a human; failing to
 	// derive one must not break the listing.
 	current, _ := e.resolveProject()
-
-	entries, err := os.ReadDir(filepath.Join(root, "projects"))
-	if err != nil && !os.IsNotExist(err) {
-		return e.fail(err)
-	}
 	type row struct {
 		Key     string `json:"key"`
 		Name    string `json:"name,omitempty"`
@@ -235,16 +332,12 @@ func cmdProjects(ctx context.Context, e *env, args []string) int {
 		Current bool   `json:"current,omitempty"`
 	}
 	rows := []row{}
-	for _, ent := range entries {
-		if !ent.IsDir() {
-			continue
-		}
-		name, source, _ := stateroot.ReadMarker(filepath.Join(root, "projects", ent.Name()))
+	for _, p := range listed {
 		rows = append(rows, row{
-			Key:     ent.Name(),
-			Name:    name,
-			Source:  source,
-			Current: ent.Name() == current.Key,
+			Key:     p.Key,
+			Name:    p.Name,
+			Source:  p.Source,
+			Current: p.Key == current.Key,
 		})
 	}
 
@@ -278,6 +371,7 @@ type env struct {
 	errOut  io.Writer
 	root    string
 	project string
+	remote  string
 	jsonOut bool
 
 	// projectFrom is the directory project derivation starts from when no
@@ -285,13 +379,26 @@ type env struct {
 	// it, so the project follows the packet rather than the caller's cwd.
 	projectFrom string
 
-	layout   stateroot.Layout
-	db       *store.DB
-	log      *events.Log
-	art      *artifacts.Store
-	claims   *claims.Store
-	sessions *sessions.Store
-	attempts *attempts.Store
+	layout stateroot.Layout
+	be     *backend.Backend
+
+	db       backend.Queries
+	log      backend.Events
+	art      backend.Artifacts
+	claims   backend.Claims
+	sessions backend.Sessions
+	attempts backend.Attempts
+}
+
+// assign points the command-facing fields at one backend, local or remote.
+func (e *env) assign(b *backend.Backend) {
+	e.be = b
+	e.db = b.Queries
+	e.log = b.Events
+	e.art = b.Artifacts
+	e.claims = b.Claims
+	e.sessions = b.Sessions
+	e.attempts = b.Attempts
 }
 
 // flags returns a FlagSet that also accepts the global flags, so that both
@@ -301,8 +408,19 @@ func (e *env) flags(name string) *flag.FlagSet {
 	fs.SetOutput(e.errOut)
 	fs.StringVar(&e.root, "root", e.root, "state root")
 	fs.StringVar(&e.project, "project", e.project, "project name")
+	fs.StringVar(&e.remote, "remote", e.remote, "loopflow server URL")
 	fs.BoolVar(&e.jsonOut, "json", e.jsonOut, "machine-readable output")
 	return fs
+}
+
+// resolveRemote applies the -remote, then LOOPFLOW_REMOTE precedence. Empty
+// means local: the file store stays first-class, and the server exists only
+// where a network boundary does.
+func (e *env) resolveRemote() string {
+	if e.remote != "" {
+		return e.remote
+	}
+	return os.Getenv("LOOPFLOW_REMOTE")
 }
 
 // resolveRoot applies the -root, then LOOPFLOW_ROOT, then default precedence.
@@ -342,12 +460,23 @@ func (e *env) resolveProject() (stateroot.Project, error) {
 // open resolves the state root, opens the database, and migrates it. Every
 // command starts here; there is no separate setup step to forget.
 func (e *env) open(ctx context.Context) error {
-	root := e.resolveRoot()
 	proj, err := e.resolveProject()
 	if err != nil {
 		return err
 	}
 
+	// A remote backend replaces the local store wholesale. The project was
+	// still resolved here: identity belongs to the work, not the endpoint.
+	if remoteURL := e.resolveRemote(); remoteURL != "" {
+		b, err := remote.Dial(remoteURL, os.Getenv("LOOPFLOW_TOKEN"), proj)
+		if err != nil {
+			return err
+		}
+		e.assign(b)
+		return nil
+	}
+
+	root := e.resolveRoot()
 	var layout stateroot.Layout
 	if root == "" {
 		layout, err = stateroot.Default(proj)
@@ -371,28 +500,24 @@ func (e *env) open(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	e.db = db
 	if _, err := db.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return err
 	}
-	e.log = events.New(db)
-
-	art, err := artifacts.Open(db, layout.Artifacts)
+	b, err := backend.Local(db, layout.Artifacts, func(ctx context.Context) ([]api.ProjectRow, error) {
+		return server.ListProjects(layout.Root)
+	})
 	if err != nil {
 		_ = db.Close()
 		return err
 	}
-	e.art = art
-	e.claims = claims.New(db)
-	e.sessions = sessions.New(db)
-	e.attempts = attempts.New(db)
+	e.assign(b)
 	return nil
 }
 
 func (e *env) close() {
-	if e.db != nil {
-		_ = e.db.Close()
+	if e.be != nil {
+		_ = e.be.Close()
 	}
 }
 

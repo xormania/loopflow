@@ -102,6 +102,47 @@ An orchestrator pins identity explicitly instead: `-project NAME` or
 migrations and remote renames. `loopflow projects` lists what a state root
 knows.
 
+## Server
+
+Where a network boundary exists — spawned worker containers, a compose
+stack — one process serves the state root and every other harness reaches it
+with environment variables alone:
+
+```console
+$ loopflow serve -listen :7171        # wherever the state lives
+
+$ export LOOPFLOW_REMOTE=http://host:7171   # in each worker
+$ export LOOPFLOW_TOKEN=<token>
+$ loopflow claim chunk-1 -owner worker-a -ttl 10m
+```
+
+Every command behaves identically over the wire — same outputs, same exit
+codes, same self-explaining refusals. Claim and session TTLs are computed on
+the server's clock, so container clock skew cannot corrupt expiry. The
+server is project-agnostic: identity travels with each request, so one
+server serves one project or many, and per-project-server versus shared-
+server is purely a deployment choice. Serving is still recording, not
+deciding — nothing here assigns work or launches anything.
+
+A compose stack needs two services and a volume:
+
+```yaml
+services:
+  loopflow:
+    build: https://github.com/xormania/loopflow.git
+    environment: { LOOPFLOW_TOKEN: "${LOOPFLOW_TOKEN}" }
+    volumes: [loopflow-state:/state]
+  worker:
+    environment:
+      LOOPFLOW_REMOTE: http://loopflow:7171
+      LOOPFLOW_TOKEN: "${LOOPFLOW_TOKEN}"
+volumes:
+  loopflow-state:
+```
+
+Without a server nothing changes: the local file store stays first-class,
+and the server exists only where a network boundary does.
+
 ## Exit codes
 
 `0` ok · `1` refused or failed · `2` evidence integrity — something did not

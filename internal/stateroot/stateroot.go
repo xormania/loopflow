@@ -141,6 +141,14 @@ func NormalizeRemote(url string) string {
 // keys or a dot that would hide it.
 var namedProject = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// ValidKey reports whether key is usable as a project directory name: a
+// derived or named key, or the reserved default. Anything else — and
+// especially anything path-like — is refused before it touches the
+// filesystem.
+func ValidKey(key string) bool {
+	return key == DefaultProjectKey || namedProject.MatchString(key)
+}
+
 // NamedProject validates an explicitly chosen project name.
 func NamedProject(name string) (Project, error) {
 	if !namedProject.MatchString(name) {
