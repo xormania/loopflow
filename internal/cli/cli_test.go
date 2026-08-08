@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/xormania/loopflow/internal/cli"
+	"github.com/xormania/loopflow/internal/stateroot"
 	"github.com/xormania/loopflow/internal/store"
 )
 
@@ -29,6 +30,17 @@ type result struct {
 func newRunner(t *testing.T) *runner {
 	t.Helper()
 	return &runner{t: t, root: filepath.Join(t.TempDir(), "state")}
+}
+
+// dbPath resolves the database the CLI would use from this process's working
+// directory, through the same derivation production uses.
+func (r *runner) dbPath() string {
+	r.t.Helper()
+	proj, err := stateroot.DeriveProject(".")
+	if err != nil {
+		r.t.Fatalf("derive project: %v", err)
+	}
+	return filepath.Join(r.root, "projects", proj.Key, "control.sqlite")
 }
 
 func (r *runner) run(args ...string) result {
@@ -173,7 +185,7 @@ func TestTamperedChainBlocks(t *testing.T) {
 	r.mustRun("init", "p1")
 	r.mustRun("record", "p1", "red", "-outcome", "failed")
 
-	db, err := sql.Open(store.DriverName, filepath.Join(r.root, "control.sqlite"))
+	db, err := sql.Open(store.DriverName, r.dbPath())
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -582,5 +594,61 @@ func TestCheckSeparatesNotAChainFromCorruption(t *testing.T) {
 	}
 	if strings.Contains(got.stderr, "evidence-integrity") {
 		t.Error("a file that was never a chain was reported as damaged evidence")
+	}
+}
+
+// fakeRepo is a work tree with no remote, so its project derives from its
+// path — distinct per directory, which is what the collision tests need.
+func fakeRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write HEAD: %v", err)
+	}
+	return dir
+}
+
+// The requirement behind projects: many repositories in flight at once, and
+// packets in different repositories must never collide or bleed together.
+func TestPacketsInDifferentReposDoNotCollide(t *testing.T) {
+	r := newRunner(t)
+	repoA, repoB := fakeRepo(t), fakeRepo(t)
+
+	t.Chdir(repoA)
+	r.mustRun("init", "p1", "-objective", "from repo a")
+	t.Chdir(repoB)
+	r.mustRun("init", "p1", "-objective", "from repo b")
+
+	if got := r.mustRun("status", "p1").stdout; !strings.Contains(got, "from repo b") {
+		t.Errorf("repo b sees the wrong packet:\n%s", got)
+	}
+	t.Chdir(repoA)
+	if got := r.mustRun("status", "p1").stdout; !strings.Contains(got, "from repo a") {
+		t.Errorf("repo a sees the wrong packet:\n%s", got)
+	}
+
+	list := r.mustRun("projects").stdout
+	if !strings.Contains(list, "(current)") {
+		t.Errorf("projects does not mark the current project:\n%s", list)
+	}
+	if lines := strings.Count(strings.TrimSpace(list), "\n") + 1; lines < 2 {
+		t.Errorf("projects lists %d projects, want at least the two repos:\n%s", lines, list)
+	}
+}
+
+// An explicit -project is the same state from anywhere — the identity an
+// orchestrator assigns must beat any derivation.
+func TestExplicitProjectPinsIdentity(t *testing.T) {
+	r := newRunner(t)
+	dirA, dirB := t.TempDir(), t.TempDir()
+
+	t.Chdir(dirA)
+	r.mustRun("-project", "px", "init", "shared")
+	t.Chdir(dirB)
+	if got := r.run("-project", "px", "init", "shared"); got.code == cli.ExitOK {
+		t.Error("the same named project from another directory did not share state")
 	}
 }

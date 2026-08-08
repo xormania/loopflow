@@ -85,6 +85,23 @@ Markers are optional. Classification also uses the exit code and whether the
 packet's chain grew, and a command that prints nothing is still recorded —
 conservatively, never inflated into a claim it didn't make.
 
+## Projects
+
+State is scoped per project, so packets in different repositories never
+collide — many repos, each with many packets and many harnesses, share one
+loopflow safely. A project is derived from the git work tree enclosing the
+working directory (for `run` and `attempts`, the packet directory). Identity
+is the normalized origin remote when there is one, so every clone and mount
+of a repository — host checkout, spawned container, compose stack — resolves
+to the same project no matter where it sits on disk; a remote-less repo falls
+back to its resolved path. Outside any work tree, work lands in the reserved
+project `_default`.
+
+An orchestrator pins identity explicitly instead: `-project NAME` or
+`$LOOPFLOW_PROJECT` names a project directly, which also survives forge
+migrations and remote renames. `loopflow projects` lists what a state root
+knows.
+
 ## Exit codes
 
 `0` ok · `1` refused or failed · `2` evidence integrity — something did not
@@ -93,6 +110,8 @@ re-hash to what was recorded · `3` claim held by another owner · `64` usage.
 ## State root
 
 `-root DIR`, else `$LOOPFLOW_ROOT`, else `$XDG_STATE_HOME/loopflow`, else
-`~/.local/state/loopflow`. Many loopflow processes may share one root: writes
+`~/.local/state/loopflow`. Each project keeps its own database and artifact
+store under `projects/<key>/` in the root. Many loopflow processes may share
+one root: writes
 are serialised by SQLite, and appends read the chain tail inside the same
 lock, so concurrent recorders queue rather than fork the chain.

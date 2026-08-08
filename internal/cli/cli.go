@@ -106,12 +106,27 @@ Commands:
         Verify a packet directory's workflow-events.jsonl in place:
         recompute every hash and link. Reads only; nothing is stored.
 
+  projects
+        List the projects this state root knows.
+
   version
 
 Flags (accepted before or after the command):
   -root DIR   state root; also $LOOPFLOW_ROOT
               (default $XDG_STATE_HOME/loopflow, else ~/.local/state/loopflow)
+  -project NAME
+              work in a named project instead of the derived one; also
+              $LOOPFLOW_PROJECT
   -json       machine-readable output
+
+Projects:
+  State is scoped per project, so packets in different repositories never
+  collide. A project is derived from the git work tree enclosing the working
+  directory (for run and attempts, the packet directory): identity is the
+  origin remote when there is one — every clone and mount of a repository is
+  the same project — else the tree's resolved path. Outside any work tree,
+  the reserved project "_default". An orchestrator pins identity explicitly
+  with -project or $LOOPFLOW_PROJECT.
 
 Concurrency:
   Many loopflow processes may share one state root. Writes are serialised by
@@ -130,6 +145,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	global.SetOutput(stderr)
 	global.Usage = func() { fmt.Fprint(stderr, usageText) }
 	global.StringVar(&e.root, "root", "", "state root")
+	global.StringVar(&e.project, "project", "", "project name")
 	global.BoolVar(&e.jsonOut, "json", false, "machine-readable output")
 
 	if err := global.Parse(args); err != nil {
@@ -181,7 +197,79 @@ func init() {
 		"session":  cmdSession,
 		"sessions": cmdSessions,
 		"release":  cmdRelease,
+		"projects": cmdProjects,
 	}
+}
+
+// cmdProjects lists the projects this state root knows. It reads only the
+// markers: a listing must not create state or open a database.
+func cmdProjects(ctx context.Context, e *env, args []string) int {
+	fs := e.flags("projects")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return ExitUsage
+	}
+	if len(pos) != 0 {
+		return e.usage(errors.New("projects takes no arguments"))
+	}
+
+	root := e.resolveRoot()
+	if root == "" {
+		root, err = stateroot.DefaultRoot()
+		if err != nil {
+			return e.fail(err)
+		}
+	}
+	// Best effort: marking the current project helps a human; failing to
+	// derive one must not break the listing.
+	current, _ := e.resolveProject()
+
+	entries, err := os.ReadDir(filepath.Join(root, "projects"))
+	if err != nil && !os.IsNotExist(err) {
+		return e.fail(err)
+	}
+	type row struct {
+		Key     string `json:"key"`
+		Name    string `json:"name,omitempty"`
+		Source  string `json:"source,omitempty"`
+		Current bool   `json:"current,omitempty"`
+	}
+	rows := []row{}
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		name, source, _ := stateroot.ReadMarker(filepath.Join(root, "projects", ent.Name()))
+		rows = append(rows, row{
+			Key:     ent.Name(),
+			Name:    name,
+			Source:  source,
+			Current: ent.Name() == current.Key,
+		})
+	}
+
+	if e.jsonOut {
+		e.writeJSON(e.out, map[string]any{"ok": true, "projects": rows})
+		return ExitOK
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(e.out, "no projects yet")
+		return ExitOK
+	}
+	for _, r := range rows {
+		line := r.Key
+		if r.Name != "" {
+			line += "  " + r.Name
+		}
+		if r.Source != "" {
+			line += "  " + r.Source
+		}
+		if r.Current {
+			line += "  (current)"
+		}
+		fmt.Fprintln(e.out, line)
+	}
+	return ExitOK
 }
 
 // env carries the flags and the lazily opened stores.
@@ -189,7 +277,13 @@ type env struct {
 	out     io.Writer
 	errOut  io.Writer
 	root    string
+	project string
 	jsonOut bool
+
+	// projectFrom is the directory project derivation starts from when no
+	// explicit project is given. Commands that take a packet directory set
+	// it, so the project follows the packet rather than the caller's cwd.
+	projectFrom string
 
 	layout   stateroot.Layout
 	db       *store.DB
@@ -206,35 +300,70 @@ func (e *env) flags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet("loopflow "+name, flag.ContinueOnError)
 	fs.SetOutput(e.errOut)
 	fs.StringVar(&e.root, "root", e.root, "state root")
+	fs.StringVar(&e.project, "project", e.project, "project name")
 	fs.BoolVar(&e.jsonOut, "json", e.jsonOut, "machine-readable output")
 	return fs
+}
+
+// resolveRoot applies the -root, then LOOPFLOW_ROOT, then default precedence.
+// The environment variable is what lets a harness point every tool it hands
+// off to at one shared store without threading a flag through every call site.
+func (e *env) resolveRoot() string {
+	if e.root != "" {
+		return e.root
+	}
+	return os.Getenv("LOOPFLOW_ROOT")
+}
+
+// resolveProject picks the project this invocation works in. An explicit
+// -project or LOOPFLOW_PROJECT wins — under an orchestrator that is the
+// assigned identity, stable across forges and mounts. Otherwise the project
+// is derived from the git work tree enclosing the packet directory (for
+// commands that take one) or the working directory.
+func (e *env) resolveProject() (stateroot.Project, error) {
+	name := e.project
+	if name == "" {
+		name = os.Getenv("LOOPFLOW_PROJECT")
+	}
+	if name != "" {
+		return stateroot.NamedProject(name)
+	}
+	from := e.projectFrom
+	if from == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return stateroot.Project{}, fmt.Errorf("cli: resolve working directory: %w", err)
+		}
+		from = wd
+	}
+	return stateroot.DeriveProject(from)
 }
 
 // open resolves the state root, opens the database, and migrates it. Every
 // command starts here; there is no separate setup step to forget.
 func (e *env) open(ctx context.Context) error {
-	// -root wins, then LOOPFLOW_ROOT, then the default. The environment variable is
-	// what lets a harness point every tool it hands off to at one shared
-	// store without threading a flag through every call site.
-	root := e.root
-	if root == "" {
-		root = os.Getenv("LOOPFLOW_ROOT")
+	root := e.resolveRoot()
+	proj, err := e.resolveProject()
+	if err != nil {
+		return err
 	}
 
-	var (
-		layout stateroot.Layout
-		err    error
-	)
+	var layout stateroot.Layout
 	if root == "" {
-		layout, err = stateroot.Default()
+		layout, err = stateroot.Default(proj)
 	} else {
-		layout, err = stateroot.New(root)
+		layout, err = stateroot.New(root, proj)
 	}
 	if err != nil {
 		return err
 	}
-	if err := layout.Ensure(); err != nil {
+	adopted, err := layout.Ensure()
+	if err != nil {
 		return err
+	}
+	if adopted {
+		fmt.Fprintf(e.errOut, "loopflow: adopted pre-project state into project %s\n",
+			stateroot.DefaultProjectKey)
 	}
 	e.layout = layout
 
@@ -1098,6 +1227,7 @@ func cmdRun(ctx context.Context, e *env, args []string) int {
 	if len(pos) != 1 {
 		return e.usage(errors.New("run takes exactly one packet directory"))
 	}
+	e.projectFrom = pos[0]
 	dir := pos[0]
 
 	// Best effort, before anything else can go wrong.
@@ -1186,6 +1316,7 @@ func cmdAttempts(ctx context.Context, e *env, args []string) int {
 		return e.usage(errors.New("attempts takes exactly one packet directory"))
 	}
 	dir := pos[0]
+	e.projectFrom = dir
 
 	current, err := readBindings(dir)
 	if err != nil {
