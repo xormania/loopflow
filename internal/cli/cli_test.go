@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/xormania/loopflow/internal/cli"
+	"github.com/xormania/loopflow/internal/events"
 	"github.com/xormania/loopflow/internal/stateroot"
 	"github.com/xormania/loopflow/internal/store"
 )
@@ -204,6 +205,88 @@ func TestTamperedChainBlocks(t *testing.T) {
 		if strings.Contains(got.stdout, `"verified": true`) {
 			t.Errorf("loopflow %s reported tampered evidence as verified", strings.Join(args, " "))
 		}
+	}
+}
+
+// relink rewrites an event to point at a predecessor that is not there,
+// recomputing its own hash so the event stays internally consistent. Only a
+// link check can catch this — the per-event hash check passes.
+func relink(t *testing.T, payload string) (raw, hash, prev string) {
+	t.Helper()
+	var ev events.Event
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&ev); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	prev = strings.Repeat("b", 64)
+	ev["prev"] = prev
+	h, err := ev.ComputeHash()
+	if err != nil {
+		t.Fatalf("rehash: %v", err)
+	}
+	ev["hash"] = h
+	b, err := ev.Canonical()
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	return string(b), h, prev
+}
+
+// A relinked chain must block. A mutation pass showed neither verify path
+// had a test where the link check was the only detector: every existing
+// tamper broke the per-event hash first. Relinking a middle event keeps
+// every hash and the recorded tail intact — the links alone are wrong.
+func TestRelinkedChainBlocks(t *testing.T) {
+	r := newRunner(t)
+	r.mustRun("init", "p1")
+	r.mustRun("record", "p1", "red", "-outcome", "failed")
+	r.mustRun("record", "p1", "green", "-outcome", "passed")
+
+	db, err := sql.Open(store.DriverName, r.dbPath())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	var payload string
+	if err := db.QueryRow(`SELECT payload FROM events WHERE seq = 2`).Scan(&payload); err != nil {
+		t.Fatalf("read event: %v", err)
+	}
+	raw, hash, prev := relink(t, payload)
+	if _, err := db.Exec(`UPDATE events SET payload = ?, hash = ?, prev = ? WHERE seq = 2`,
+		raw, hash, prev); err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+	_ = db.Close()
+
+	if got := r.run("verify", "p1"); got.code != cli.ExitIntegrity {
+		t.Errorf("verify after relink: exit %d, want %d\n%s%s",
+			got.code, cli.ExitIntegrity, got.stdout, got.stderr)
+	}
+}
+
+// The same relink must block on the packet-directory path.
+func TestCheckBlocksARelinkedChain(t *testing.T) {
+	r := newRunner(t)
+	r.mustRun("init", "p1")
+	r.mustRun("record", "p1", "red", "-outcome", "failed")
+	r.mustRun("record", "p1", "green", "-outcome", "passed")
+
+	lines := strings.Split(strings.TrimSpace(r.mustRun("log", "p1").stdout), "\n")
+	raw, _, _ := relink(t, lines[1])
+	lines[1] = raw
+
+	dir := filepath.Join(t.TempDir(), "packet")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "workflow-events.jsonl"),
+		[]byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := r.run("check", dir); got.code != cli.ExitIntegrity {
+		t.Errorf("check after relink: exit %d, want %d\n%s%s",
+			got.code, cli.ExitIntegrity, got.stdout, got.stderr)
 	}
 }
 
