@@ -1,6 +1,6 @@
-# The green bar AGENTS.md demands, enforced where nobody can skip it. One
-# job so the ruleset needs exactly one required check. Nothing here decides
-# anything about the code beyond: formatted, vetted, race-clean, image builds.
+# The green bar AGENTS.md demands, enforced where nobody can skip it.
+# Job names are the check names the ruleset requires — renaming a job here
+# means updating the ruleset by hand, or every PR waits on a ghost check.
 name: ci
 on:
   pull_request:
@@ -9,7 +9,8 @@ on:
 permissions:
   contents: read
 jobs:
-  checks:
+  lint:
+    name: "CI:lint"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +23,20 @@ jobs:
           if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
       - name: vet
         run: go vet ./...
+  test:
+    name: "CI:test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: test
         run: go test -race -count=1 ./...
-      - name: image
+  image:
+    name: "CI:image"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
         run: docker build .
