@@ -248,8 +248,13 @@ func TestRemoteRunRecordsAttemptsAndRefusals(t *testing.T) {
 		t.Errorf("run did not pass the exit code through: %d", refusal.code)
 	}
 
-	listed := r.mustRun("px", "attempts", dir).stdout
-	if !strings.Contains(listed, "stage is frozen") {
-		t.Errorf("the refusal did not survive to the server:\n%s", listed)
+	listed := r.mustRun("px", "-json", "attempts", dir).stdout
+	// Both the reason and the classification must survive: a refusal whose
+	// text is kept but whose kind degrades to unclassified-failure has been
+	// conflated with a crash, which the recorder exists to prevent.
+	for _, want := range []string{"attempt-refusal", "stage is frozen"} {
+		if !strings.Contains(listed, want) {
+			t.Errorf("attempts lacks %q:\n%s", want, listed)
+		}
 	}
 }
