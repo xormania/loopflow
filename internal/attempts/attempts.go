@@ -1,4 +1,4 @@
-// Package attempts records what was attempted against a native Flow packet and
+// Package attempts records what was attempted against a packet directory and
 // what happened, so a refusal survives the transcript it was printed to.
 //
 // A refused transition raises before it appends anything: no event, no state
@@ -33,9 +33,9 @@ import (
 
 // Kinds an attempt can have. Anything that conflates these makes the record
 // worse than not having it.
-// Kinds. None of these says "accepted": acceptance is Flow's word and Flow's
-// decision, and a recorder borrowing it would be claiming something it does not
-// own. These describe only what was observed — whether the command succeeded,
+// Kinds. None of these says "accepted": acceptance is the wrapped tool's word
+// and its decision, and a recorder borrowing it would be claiming something it
+// does not own. These describe only what was observed — whether the command succeeded,
 // and whether the packet's chain grew.
 const (
 	// KindRefusal: refused, and the packet is unchanged.
@@ -51,7 +51,7 @@ const (
 	KindNoTransition = "no-transition"
 	// KindInfrastructure: the run could not be judged on its merits.
 	KindInfrastructure = "infrastructure-result"
-	// KindUsage: the command was malformed and never reached Flow's own
+	// KindUsage: the command was malformed and never reached the tool's own
 	// validation, so it says nothing about the packet.
 	KindUsage = "usage-error"
 	// KindUnclassified: it failed, printed no marker, and appended nothing.
@@ -69,8 +69,9 @@ const (
 	FirstFailure = "first_failure"
 )
 
-// Markers Flow prints. The marker-to-exit mapping is the one piece of a
-// refusal that is genuinely machine-readable.
+// Markers a wrapped tool may print, at line start on stderr. The
+// marker-to-exit mapping is the one piece of a refusal that is genuinely
+// machine-readable.
 const (
 	MarkerError   = "WORKFLOW-ERROR"   // exit 2
 	MarkerFailed  = "WORKFLOW-FAILED"  // exit 1
@@ -152,10 +153,10 @@ type Outcome struct {
 // Classify decides what an outcome was, from the exit code, the marker, and
 // whether the packet actually moved.
 //
-// Whether an event was appended is the load-bearing signal. Flow reaches its
-// central exception handler both from refusals that changed nothing and from
-// paths that appended an event and wrote state first, so the exit code alone
-// cannot tell those apart.
+// Whether an event was appended is the load-bearing signal. A wrapped tool can
+// reach one exit path both from refusals that changed nothing and from paths
+// that appended an event and wrote state first, so the exit code alone cannot
+// tell those apart.
 func Classify(o Outcome) (kind, marker, reason, exhaustiveness string) {
 	if o.StartErr != "" {
 		return KindNotRun, "", o.StartErr, ""
@@ -195,7 +196,7 @@ func Classify(o Outcome) (kind, marker, reason, exhaustiveness string) {
 }
 
 // looksLikeUsage recognises an argument-parser failure, which happens before
-// Flow's own validation and so says nothing about the packet.
+// the wrapped tool's own validation and so says nothing about the packet.
 func looksLikeUsage(stderr []byte) bool {
 	for _, line := range strings.Split(string(stderr), "\n") {
 		if strings.HasPrefix(line, "usage:") || strings.HasPrefix(line, "Usage:") {
@@ -205,7 +206,7 @@ func looksLikeUsage(stderr []byte) bool {
 	return false
 }
 
-// findMarker returns the Flow marker and the message following it.
+// findMarker returns the workflow marker and the message following it.
 //
 // Only the start of a line in stderr counts. Searching the whole of stdout and
 // stderr as a substring let quoted or example marker text steer the
