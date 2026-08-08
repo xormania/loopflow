@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -97,10 +98,18 @@ func TestRemoteRefusalKeepsItsShape(t *testing.T) {
 	if got.code != cli.ExitFailed {
 		t.Fatalf("exit = %d, want %d", got.code, cli.ExitFailed)
 	}
-	for _, want := range []string{"precondition-failed", "packet exists"} {
-		if !strings.Contains(got.stderr, want) {
-			t.Errorf("refusal lacks %q:\n%s", want, got.stderr)
-		}
+	// Structured fields, not substrings: a de-typed error still carries the
+	// refusal's text in its message, so only the fields prove the type
+	// survived the wire.
+	var v map[string]any
+	if err := json.Unmarshal([]byte(got.stderr), &v); err != nil {
+		t.Fatalf("stderr is not JSON: %v\n%s", err, got.stderr)
+	}
+	if v["classification"] != "precondition-failed" || v["precondition"] != "packet exists" {
+		t.Errorf("refusal = %v", v)
+	}
+	if v["needed"] == nil || v["needed"] == "" {
+		t.Error("refusal does not say what is needed")
 	}
 }
 
