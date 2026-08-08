@@ -4,8 +4,28 @@ You are developing `loopflow`: a small Go CLI that tracks workflow packets as an
 append-only, hash-verified event chain in SQLite, plus a content-addressed
 artifact store.
 
-Status: **local-only.** No remote, no GitHub, no hosted CI. Do not run `gh`,
-push, PR, or any forge operation against this repo.
+Status: hosted at `github.com/xormania/loopflow`. Agents work locally under
+the `xor-machine` machine identity (collaborator: push, no admin).
+
+## GitHub workflow
+
+- Branch from `main`, push the branch, open a **draft PR against `main`**.
+  Never push to `main` directly. Marking a PR ready, approving, and merging
+  are xormania's web-UI acts — do not do them.
+- **Attribution is xormania only.** Author and committer stay
+  `xormania <127287135+xormania@users.noreply.github.com>` (the existing git
+  config). No `Co-Authored-By` trailers. No tool names anywhere in branch
+  names, commit messages, or PR text — no generated-with footers.
+- **Naming:**
+  - Commit: `<area>: <imperative summary>` — `<area>` is the command or
+    package touched (`check`, `attempts`, `store`, `canonical`, …), or `repo`
+    for anything else. The body states the decision and its reason, not the
+    story of arriving at it.
+  - Branch: `<area>/<short-slug>`.
+  - PR title: same `<area>: <summary>` form as its headline commit.
+- Forge operations allowed: pushing non-main branches, `gh pr create --draft`,
+  reading PRs/issues, commenting on your own PR. Everything else (merge,
+  ruleset, repo settings) is not yours.
 
 ## Ground rules
 
