@@ -3,6 +3,8 @@ package cli_test
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -96,10 +98,18 @@ func TestRemoteRefusalKeepsItsShape(t *testing.T) {
 	if got.code != cli.ExitFailed {
 		t.Fatalf("exit = %d, want %d", got.code, cli.ExitFailed)
 	}
-	for _, want := range []string{"precondition-failed", "packet exists"} {
-		if !strings.Contains(got.stderr, want) {
-			t.Errorf("refusal lacks %q:\n%s", want, got.stderr)
-		}
+	// Structured fields, not substrings: a de-typed error still carries the
+	// refusal's text in its message, so only the fields prove the type
+	// survived the wire.
+	var v map[string]any
+	if err := json.Unmarshal([]byte(got.stderr), &v); err != nil {
+		t.Fatalf("stderr is not JSON: %v\n%s", err, got.stderr)
+	}
+	if v["classification"] != "precondition-failed" || v["precondition"] != "packet exists" {
+		t.Errorf("refusal = %v", v)
+	}
+	if v["needed"] == nil || v["needed"] == "" {
+		t.Error("refusal does not say what is needed")
 	}
 }
 
@@ -195,4 +205,65 @@ func TestRemoteWrongTokenIsRefused(t *testing.T) {
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+// The central coordination promise under the load Loopmaster will generate:
+// many parallel workers race one claim, exactly one wins, everyone else is
+// told so with exit 3.
+func TestRemoteParallelClaimsHaveOneWinner(t *testing.T) {
+	r := newRemoteRunner(t)
+	r.mustRun("px", "init", "p1")
+
+	const workers = 12
+	codes := make(chan int, workers)
+	for i := range workers {
+		go func() {
+			got := r.run("px", "claim", "p1", "-owner", fmt.Sprintf("harness-%d", i), "-ttl", "5m")
+			codes <- got.code
+		}()
+	}
+
+	winners, held := 0, 0
+	for range workers {
+		switch code := <-codes; code {
+		case cli.ExitOK:
+			winners++
+		case cli.ExitHeld:
+			held++
+		default:
+			t.Errorf("a racing claim exited %d, want %d or %d", code, cli.ExitOK, cli.ExitHeld)
+		}
+	}
+	if winners != 1 {
+		t.Errorf("winners = %d, want exactly 1 (held: %d)", winners, held)
+	}
+}
+
+// run executes locally and records remotely: output and exit pass through,
+// and the attempt — including a refusal that leaves no trace in the packet —
+// survives on the server for attempts to find.
+func TestRemoteRunRecordsAttemptsAndRefusals(t *testing.T) {
+	r := newRemoteRunner(t)
+	dir := writePacket(t, "tests-frozen", 1, "head-1")
+
+	ok := r.mustRun("px", "run", dir, "--", "/bin/echo", "hello from the wrapped tool")
+	if !strings.Contains(ok.stdout, "hello from the wrapped tool") {
+		t.Errorf("run did not pass output through:\n%s", ok.stdout)
+	}
+
+	refusal := r.run("px", "run", dir, "--", "/bin/sh", "-c",
+		`echo "WORKFLOW-ERROR stage is frozen" >&2; exit 2`)
+	if refusal.code != 2 {
+		t.Errorf("run did not pass the exit code through: %d", refusal.code)
+	}
+
+	listed := r.mustRun("px", "-json", "attempts", dir).stdout
+	// Both the reason and the classification must survive: a refusal whose
+	// text is kept but whose kind degrades to unclassified-failure has been
+	// conflated with a crash, which the recorder exists to prevent.
+	for _, want := range []string{"attempt-refusal", "stage is frozen"} {
+		if !strings.Contains(listed, want) {
+			t.Errorf("attempts lacks %q:\n%s", want, listed)
+		}
+	}
 }
